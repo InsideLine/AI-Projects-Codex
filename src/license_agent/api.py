@@ -4,6 +4,8 @@ import re
 
 from .agent import LicenseViolationAgent
 from .models import InvestigationInput
+from .settings import safe_load_settings
+from .zoho import ZohoClient, ZohoError
 
 try:
     from fastapi import FastAPI
@@ -24,6 +26,36 @@ class TeamsMessage(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/aws/health")
+def aws_health() -> dict[str, object]:
+    settings, warning = safe_load_settings(".env")
+    payload = settings.aws_cli_status()
+    payload["warning"] = warning
+    return payload
+
+
+@app.get("/zoho/health")
+def zoho_health() -> dict[str, object]:
+    settings, warning = safe_load_settings(".env")
+    client = ZohoClient(settings)
+    payload = {
+        **settings.zoho_status(),
+        **client.status().__dict__,
+    }
+    payload["warning"] = warning
+    return payload
+
+
+@app.get("/zoho/oauth/url")
+def zoho_oauth_url() -> dict[str, str]:
+    settings, _ = safe_load_settings(".env")
+    client = ZohoClient(settings)
+    try:
+        return {"authorization_url": client.build_authorization_url()}
+    except ZohoError as exc:
+        return {"error": str(exc)}
 
 
 @app.post("/teams/message")
@@ -55,4 +87,3 @@ def parse_subject(text: str) -> dict[str, str]:
     if company_match:
         return {"company_name": company_match.group(1).strip()}
     return {"company_name": text.strip()}
-

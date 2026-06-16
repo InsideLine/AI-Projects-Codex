@@ -2,6 +2,7 @@
 
 from .agent import LicenseViolationAgent
 from .analysis import RuleEngine
+from .settings import LicenseAgentSettings
 from .models import (
     Activation,
     Finding,
@@ -19,10 +20,10 @@ __all__ = [
     "GeoLocation",
     "InvestigationInput",
     "InvestigationReport",
+    "LicenseAgentSettings",
     "LicenseEntitlement",
     "LicenseViolationAgent",
     "OrganizationDefinition",
     "RuleEngine",
     "UsageRecord",
 ]
-
