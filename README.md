@@ -24,7 +24,7 @@ Aurora is the better primary report database because the agent needs repeated en
 ## Project Layout
 
 - `src/license_agent/`: agent core, rule engine, data models, feedback store, connectors, and Teams API stub.
-- `src/license_agent/`: also includes AWS CLI detection, settings loading, and Zoho CRM connection helpers.
+- `src/license_agent/`: also includes AWS CLI detection, settings loading, SOLO helpers, and Zoho CRM connection helpers.
 - `infra/schema.sql`: Aurora PostgreSQL schema for normalized data and investigation outputs.
 - `docs/`: implementation plan, architecture, data requirements, known gaps, and CodeCommit setup.
 - `context/`: compact context files intended for future AI coding tools.
@@ -52,6 +52,7 @@ Included now:
 - CSV connector scaffolds for SOLO, AWS customer usage exports, and Zoho CRM exports.
 - FastAPI Teams-facing endpoint stub.
 - AWS CLI detection plus Secrets Manager-backed Zoho credential loading.
+- SOLO XML service and report-export scaffolding with a bulk-first integration strategy.
 - Zoho CRM setup helpers and health endpoints.
 - Tests for high-signal violation scenarios and negative cases.
 

@@ -3,6 +3,7 @@
 from .agent import LicenseViolationAgent
 from .analysis import RuleEngine
 from .settings import LicenseAgentSettings
+from .solo import SoloClient, SoloReportRequest
 from .models import (
     Activation,
     Finding,
@@ -25,5 +26,7 @@ __all__ = [
     "LicenseViolationAgent",
     "OrganizationDefinition",
     "RuleEngine",
+    "SoloClient",
+    "SoloReportRequest",
     "UsageRecord",
 ]

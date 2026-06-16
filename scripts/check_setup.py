@@ -4,16 +4,19 @@ import json
 from pathlib import Path
 
 from license_agent.settings import safe_load_settings
+from license_agent.solo import SoloClient
 from license_agent.zoho import ZohoClient
 
 
 def main() -> None:
     dotenv_path = Path(".env")
     settings, warning = safe_load_settings(dotenv_path if dotenv_path.exists() else None)
+    solo = SoloClient(settings)
     zoho = ZohoClient(settings)
 
     payload = {
         "aws": settings.aws_cli_status(),
+        "solo": solo.status(),
         "zoho": {
             **settings.zoho_status(),
             **zoho.status().__dict__,
@@ -25,4 +28,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

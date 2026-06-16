@@ -25,6 +25,11 @@ class LicenseAgentSettings:
     aws_region: str = "us-east-1"
     aws_profile: str | None = None
     aws_cli_path: str | None = None
+    solo_credentials_secret_name: str | None = None
+    solo_base_url: str = "https://secure.softwarekey.com/solo"
+    solo_author_id: str | None = None
+    solo_api_user_id: str | None = None
+    solo_api_user_password: str | None = None
     zoho_credentials_secret_name: str | None = None
     zoho_datacenter: str = "com"
     zoho_client_id: str | None = None
@@ -52,6 +57,11 @@ class LicenseAgentSettings:
             aws_region=os.getenv("AWS_REGION", "us-east-1"),
             aws_profile=_clean(os.getenv("AWS_PROFILE")),
             aws_cli_path=_clean(os.getenv("AWS_CLI_PATH")),
+            solo_credentials_secret_name=_clean(os.getenv("SOLO_CREDENTIALS_SECRET_NAME")),
+            solo_base_url=os.getenv("SOLO_BASE_URL", "https://secure.softwarekey.com/solo"),
+            solo_author_id=_clean(os.getenv("SOLO_AUTHOR_ID")),
+            solo_api_user_id=_clean(os.getenv("SOLO_API_USER_ID")),
+            solo_api_user_password=_clean(os.getenv("SOLO_API_USER_PASSWORD")),
             zoho_credentials_secret_name=_clean(os.getenv("ZOHO_CREDENTIALS_SECRET_NAME")),
             zoho_datacenter=os.getenv("ZOHO_DATACENTER", "com"),
             zoho_client_id=_clean(os.getenv("ZOHO_CLIENT_ID")),
@@ -68,42 +78,67 @@ class LicenseAgentSettings:
         return settings.with_secret_fallback() if enable_secret_fallback else settings
 
     def with_secret_fallback(self) -> "LicenseAgentSettings":
+        solo_secret_payload: dict[str, object] = {}
+        zoho_secret_payload: dict[str, object] = {}
+
+        if self.solo_credentials_secret_name and not (
+            self.solo_author_id and self.solo_api_user_id and self.solo_api_user_password
+        ):
+            solo_secret_payload = fetch_secret_json(
+                self.solo_credentials_secret_name,
+                region=self.aws_region,
+                profile=self.aws_profile,
+                aws_cli_path=self.aws_cli_path,
+            )
+
         if not self.zoho_credentials_secret_name:
-            return self
-        if self.zoho_client_id and self.zoho_client_secret and (self.zoho_refresh_token or self.zoho_grant_token):
+            if not solo_secret_payload:
+                return self
+        if self.zoho_credentials_secret_name and not (
+            self.zoho_client_id and self.zoho_client_secret and (self.zoho_refresh_token or self.zoho_grant_token)
+        ):
+            zoho_secret_payload = fetch_secret_json(
+                self.zoho_credentials_secret_name,
+                region=self.aws_region,
+                profile=self.aws_profile,
+                aws_cli_path=self.aws_cli_path,
+            )
+        elif not solo_secret_payload:
             return self
 
-        secret_payload = fetch_secret_json(
-            self.zoho_credentials_secret_name,
-            region=self.aws_region,
-            profile=self.aws_profile,
-            aws_cli_path=self.aws_cli_path,
-        )
         return LicenseAgentSettings(
             aws_region=self.aws_region,
             aws_profile=self.aws_profile,
             aws_cli_path=self.aws_cli_path,
+            solo_credentials_secret_name=self.solo_credentials_secret_name,
+            solo_base_url=_prefer(self.solo_base_url, solo_secret_payload.get("SOLO_BASE_URL"), "https://secure.softwarekey.com/solo"),
+            solo_author_id=_prefer(self.solo_author_id, solo_secret_payload.get("SOLO_AUTHOR_ID")),
+            solo_api_user_id=_prefer(self.solo_api_user_id, solo_secret_payload.get("SOLO_API_USER_ID")),
+            solo_api_user_password=_prefer(
+                self.solo_api_user_password,
+                solo_secret_payload.get("SOLO_API_USER_PASSWORD"),
+            ),
             zoho_credentials_secret_name=self.zoho_credentials_secret_name,
-            zoho_datacenter=_prefer(self.zoho_datacenter, secret_payload.get("ZOHO_DATACENTER"), "com"),
-            zoho_client_id=_prefer(self.zoho_client_id, secret_payload.get("ZOHO_CLIENT_ID")),
-            zoho_client_secret=_prefer(self.zoho_client_secret, secret_payload.get("ZOHO_CLIENT_SECRET")),
-            zoho_refresh_token=_prefer(self.zoho_refresh_token, secret_payload.get("ZOHO_REFRESH_TOKEN")),
-            zoho_grant_token=_prefer(self.zoho_grant_token, secret_payload.get("ZOHO_GRANT_TOKEN")),
-            zoho_redirect_uri=_prefer(self.zoho_redirect_uri, secret_payload.get("ZOHO_REDIRECT_URI")),
-            zoho_scopes=_prefer(self.zoho_scopes, secret_payload.get("ZOHO_SCOPES"), "ZohoCRM.modules.ALL"),
-            zoho_crm_api_base=_prefer(self.zoho_crm_api_base, secret_payload.get("ZOHO_CRM_API_BASE")),
+            zoho_datacenter=_prefer(self.zoho_datacenter, zoho_secret_payload.get("ZOHO_DATACENTER"), "com"),
+            zoho_client_id=_prefer(self.zoho_client_id, zoho_secret_payload.get("ZOHO_CLIENT_ID")),
+            zoho_client_secret=_prefer(self.zoho_client_secret, zoho_secret_payload.get("ZOHO_CLIENT_SECRET")),
+            zoho_refresh_token=_prefer(self.zoho_refresh_token, zoho_secret_payload.get("ZOHO_REFRESH_TOKEN")),
+            zoho_grant_token=_prefer(self.zoho_grant_token, zoho_secret_payload.get("ZOHO_GRANT_TOKEN")),
+            zoho_redirect_uri=_prefer(self.zoho_redirect_uri, zoho_secret_payload.get("ZOHO_REDIRECT_URI")),
+            zoho_scopes=_prefer(self.zoho_scopes, zoho_secret_payload.get("ZOHO_SCOPES"), "ZohoCRM.modules.ALL"),
+            zoho_crm_api_base=_prefer(self.zoho_crm_api_base, zoho_secret_payload.get("ZOHO_CRM_API_BASE")),
             zoho_analytics_workspace_name=_prefer(
                 self.zoho_analytics_workspace_name,
-                secret_payload.get("ZOHO_ANALYTICS_WORKSPACE_NAME"),
+                zoho_secret_payload.get("ZOHO_ANALYTICS_WORKSPACE_NAME"),
                 "Statistics Pilot",
             ),
             zoho_analytics_workspace_id=_prefer(
                 self.zoho_analytics_workspace_id,
-                secret_payload.get("ZOHO_ANALYTICS_WORKSPACE_ID"),
+                zoho_secret_payload.get("ZOHO_ANALYTICS_WORKSPACE_ID"),
             ),
             zoho_analytics_org_id=_prefer(
                 self.zoho_analytics_org_id,
-                secret_payload.get("ZOHO_ANALYTICS_ORG_ID"),
+                zoho_secret_payload.get("ZOHO_ANALYTICS_ORG_ID"),
             ),
         )
 
@@ -130,6 +165,16 @@ class LicenseAgentSettings:
             "analytics_workspace_name": self.zoho_analytics_workspace_name,
             "analytics_workspace_id": self.zoho_analytics_workspace_id,
             "analytics_org_id": self.zoho_analytics_org_id,
+        }
+
+    def solo_status(self) -> dict[str, object]:
+        return {
+            "credentials_source": "aws-secrets-manager" if self.solo_credentials_secret_name else "environment",
+            "secret_name": self.solo_credentials_secret_name,
+            "base_url": self.solo_base_url,
+            "has_author_id": bool(self.solo_author_id),
+            "has_api_user_id": bool(self.solo_api_user_id),
+            "has_api_user_password": bool(self.solo_api_user_password),
         }
 
 

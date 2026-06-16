@@ -5,6 +5,7 @@ import re
 from .agent import LicenseViolationAgent
 from .models import InvestigationInput
 from .settings import safe_load_settings
+from .solo import SoloClient
 from .zoho import ZohoClient, ZohoError
 
 try:
@@ -44,6 +45,15 @@ def zoho_health() -> dict[str, object]:
         **settings.zoho_status(),
         **client.status().__dict__,
     }
+    payload["warning"] = warning
+    return payload
+
+
+@app.get("/solo/health")
+def solo_health() -> dict[str, object]:
+    settings, warning = safe_load_settings(".env")
+    client = SoloClient(settings)
+    payload = client.status()
     payload["warning"] = warning
     return payload
 

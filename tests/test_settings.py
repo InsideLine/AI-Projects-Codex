@@ -37,21 +37,31 @@ class SettingsTests(TestCase):
             os.environ,
             {
                 "AWS_REGION": "us-east-1",
+                "SOLO_CREDENTIALS_SECRET_NAME": "AxiomProjects/SOLO",
                 "ZOHO_CREDENTIALS_SECRET_NAME": "AxiomProjects/ZohoCRM",
             },
             clear=True,
         ):
             with patch(
                 "license_agent.settings.fetch_secret_json",
-                return_value={
-                    "ZOHO_CLIENT_ID": "client-id",
-                    "ZOHO_CLIENT_SECRET": "client-secret",
-                    "ZOHO_REFRESH_TOKEN": "refresh-token",
-                    "ZOHO_ANALYTICS_WORKSPACE_ID": "workspace-id",
-                },
+                side_effect=[
+                    {
+                        "SOLO_AUTHOR_ID": "author-id",
+                        "SOLO_API_USER_ID": "solo-user",
+                        "SOLO_API_USER_PASSWORD": "solo-pass",
+                    },
+                    {
+                        "ZOHO_CLIENT_ID": "client-id",
+                        "ZOHO_CLIENT_SECRET": "client-secret",
+                        "ZOHO_REFRESH_TOKEN": "refresh-token",
+                        "ZOHO_ANALYTICS_WORKSPACE_ID": "workspace-id",
+                    },
+                ],
             ):
                 settings = LicenseAgentSettings.from_env()
 
+        self.assertEqual(settings.solo_author_id, "author-id")
+        self.assertEqual(settings.solo_api_user_id, "solo-user")
         self.assertEqual(settings.zoho_client_id, "client-id")
         self.assertEqual(settings.zoho_client_secret, "client-secret")
         self.assertEqual(settings.zoho_refresh_token, "refresh-token")
