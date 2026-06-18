@@ -2,6 +2,7 @@
 
 from .agent import LicenseViolationAgent
 from .analysis import RuleEngine
+from .ingest import FilesystemLandingZone, RawBatch, PersistedBatch, storage_recommendation
 from .settings import LicenseAgentSettings
 from .solo import SoloClient, SoloReportRequest
 from .models import (
@@ -18,6 +19,7 @@ from .models import (
 __all__ = [
     "Activation",
     "Finding",
+    "FilesystemLandingZone",
     "GeoLocation",
     "InvestigationInput",
     "InvestigationReport",
@@ -25,8 +27,11 @@ __all__ = [
     "LicenseEntitlement",
     "LicenseViolationAgent",
     "OrganizationDefinition",
+    "PersistedBatch",
+    "RawBatch",
     "RuleEngine",
     "SoloClient",
     "SoloReportRequest",
     "UsageRecord",
+    "storage_recommendation",
 ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from license_agent.ingest import build_landing_zone, storage_recommendation
 from license_agent.settings import safe_load_settings
 from license_agent.solo import SoloClient
 from license_agent.zoho import ZohoClient
@@ -11,11 +12,17 @@ from license_agent.zoho import ZohoClient
 def main() -> None:
     dotenv_path = Path(".env")
     settings, warning = safe_load_settings(dotenv_path if dotenv_path.exists() else None)
+    landing_zone = build_landing_zone(settings)
     solo = SoloClient(settings)
     zoho = ZohoClient(settings)
 
     payload = {
         "aws": settings.aws_cli_status(),
+        "ingest": {
+            **settings.ingest_status(),
+            "landing_zone": landing_zone.health(),
+            "recommendation": storage_recommendation(settings),
+        },
         "solo": solo.status(),
         "zoho": {
             **settings.zoho_status(),

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from typing import Any
 
 from .agent import LicenseViolationAgent
+from .ingest import RawBatch, build_landing_zone, storage_recommendation
 from .models import InvestigationInput
 from .settings import safe_load_settings
 from .solo import SoloClient
@@ -24,6 +27,17 @@ class TeamsMessage(BaseModel):
     user_email: str | None = None
 
 
+class RawIngestRequest(BaseModel):
+    source_system: str
+    dataset: str
+    records: list[dict[str, Any]]
+    extracted_at: datetime | None = None
+    source_account: str | None = None
+    schema_version: str | None = None
+    cursor: str | None = None
+    notes: str | None = None
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -35,6 +49,48 @@ def aws_health() -> dict[str, object]:
     payload = settings.aws_cli_status()
     payload["warning"] = warning
     return payload
+
+
+@app.get("/ingest/health")
+def ingest_health() -> dict[str, object]:
+    settings, warning = safe_load_settings(".env")
+    landing_zone = build_landing_zone(settings)
+    payload = {
+        **settings.ingest_status(),
+        "landing_zone": landing_zone.health(),
+        "recommendation": storage_recommendation(settings),
+        "warning": warning,
+    }
+    return payload
+
+
+@app.post("/ingest/raw-batch")
+def ingest_raw_batch(batch: RawIngestRequest) -> dict[str, object]:
+    settings, warning = safe_load_settings(".env")
+    landing_zone = build_landing_zone(settings)
+    persisted = landing_zone.persist(
+        RawBatch(
+            source_system=batch.source_system,
+            dataset=batch.dataset,
+            records=tuple(batch.records),
+            extracted_at=batch.extracted_at,
+            source_account=batch.source_account,
+            schema_version=batch.schema_version,
+            cursor=batch.cursor,
+            notes=batch.notes,
+        )
+    )
+    return {
+        "batch_id": persisted.batch_id,
+        "source_system": persisted.source_system,
+        "dataset": persisted.dataset,
+        "record_count": persisted.record_count,
+        "manifest_path": persisted.manifest_path,
+        "records_path": persisted.records_path,
+        "sha256_hex": persisted.sha256_hex,
+        "received_at": persisted.received_at.isoformat(),
+        "warning": warning,
+    }
 
 
 @app.get("/zoho/health")

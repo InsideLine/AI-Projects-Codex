@@ -10,6 +10,22 @@ CREATE TABLE source_extracts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE raw_ingest_batches (
+    id BIGSERIAL PRIMARY KEY,
+    batch_id TEXT NOT NULL UNIQUE,
+    source_system TEXT NOT NULL,
+    dataset TEXT NOT NULL,
+    source_account TEXT,
+    schema_version TEXT,
+    cursor TEXT,
+    extracted_at TIMESTAMPTZ,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    record_count BIGINT NOT NULL,
+    storage_uri TEXT NOT NULL,
+    manifest_uri TEXT NOT NULL,
+    checksum_sha256 TEXT NOT NULL
+);
+
 CREATE TABLE companies (
     id BIGSERIAL PRIMARY KEY,
     canonical_name TEXT NOT NULL UNIQUE,
@@ -134,4 +150,4 @@ CREATE INDEX idx_usage_license_start ON usage_records (license_id, start_time);
 CREATE INDEX idx_usage_company ON usage_records (company_name);
 CREATE INDEX idx_usage_tenant ON usage_records (tenant_id, tenant_name);
 CREATE INDEX idx_findings_code ON investigation_findings (code);
-
+CREATE INDEX idx_raw_ingest_source_dataset ON raw_ingest_batches (source_system, dataset, received_at);

@@ -25,6 +25,11 @@ class LicenseAgentSettings:
     aws_region: str = "us-east-1"
     aws_profile: str | None = None
     aws_cli_path: str | None = None
+    ingest_raw_root: str = "local_data/raw"
+    raw_s3_bucket: str | None = None
+    athena_output_s3_uri: str | None = None
+    glue_database_name: str | None = None
+    aurora_database_url: str | None = None
     solo_credentials_secret_name: str | None = None
     solo_base_url: str = "https://secure.softwarekey.com/solo"
     solo_author_id: str | None = None
@@ -57,6 +62,11 @@ class LicenseAgentSettings:
             aws_region=os.getenv("AWS_REGION", "us-east-1"),
             aws_profile=_clean(os.getenv("AWS_PROFILE")),
             aws_cli_path=_clean(os.getenv("AWS_CLI_PATH")),
+            ingest_raw_root=os.getenv("INGEST_RAW_ROOT", "local_data/raw"),
+            raw_s3_bucket=_clean(os.getenv("RAW_S3_BUCKET")),
+            athena_output_s3_uri=_clean(os.getenv("ATHENA_OUTPUT_S3_URI")),
+            glue_database_name=_clean(os.getenv("GLUE_DATABASE_NAME")),
+            aurora_database_url=_clean(os.getenv("AURORA_DATABASE_URL")),
             solo_credentials_secret_name=_clean(os.getenv("SOLO_CREDENTIALS_SECRET_NAME")),
             solo_base_url=os.getenv("SOLO_BASE_URL", "https://secure.softwarekey.com/solo"),
             solo_author_id=_clean(os.getenv("SOLO_AUTHOR_ID")),
@@ -150,6 +160,15 @@ class LicenseAgentSettings:
             "version": info.version,
             "profile": self.aws_profile,
             "region": self.aws_region,
+        }
+
+    def ingest_status(self) -> dict[str, object]:
+        return {
+            "raw_root": self.ingest_raw_root,
+            "raw_s3_bucket": self.raw_s3_bucket,
+            "athena_output_s3_uri": self.athena_output_s3_uri,
+            "glue_database_name": self.glue_database_name,
+            "aurora_database_url_configured": bool(self.aurora_database_url),
         }
 
     def zoho_status(self) -> dict[str, object]:
