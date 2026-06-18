@@ -27,6 +27,7 @@ This project is starting with the cheaper, slower, more flexible path because th
 - `src/license_agent/`: agent core, rule engine, data models, feedback store, connectors, and Teams API stub.
 - `src/license_agent/`: also includes AWS CLI detection, settings loading, SOLO helpers, and Zoho CRM connection helpers.
 - `src/license_agent/`: also includes raw batch ingestion and landing-zone storage helpers.
+- `src/license_agent/`: also includes DynamoDB pull-sync helpers for cross-account AWS ingestion.
 - `infra/schema.sql`: Aurora PostgreSQL schema for normalized data and investigation outputs.
 - `docs/`: implementation plan, architecture, data requirements, known gaps, and CodeCommit setup.
 - `context/`: compact context files intended for future AI coding tools.
@@ -57,6 +58,7 @@ Included now:
 - SOLO XML service and report-export scaffolding with a bulk-first integration strategy.
 - Zoho CRM setup helpers and health endpoints.
 - Raw ingestion endpoint and landing-zone storage for incoming AWS table/API data.
+- Incremental DynamoDB table sync with resume checkpoints for `ProcessInfo`, `SiteInfo`, and `TenantInfo`.
 - Tests for high-signal violation scenarios and negative cases.
 
 Not included yet:
