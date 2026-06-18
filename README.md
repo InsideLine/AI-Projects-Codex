@@ -13,13 +13,14 @@ The agent does not query SOLO, AWS usage stores, and Zoho CRM every time a user 
 
 ## Recommended Architecture
 
-Use both S3 and Aurora PostgreSQL:
+Use `S3 + Glue Data Catalog + Athena` first, and add Aurora PostgreSQL only if the query pattern later justifies it:
 
 - S3 stores raw extracts exactly as received from SOLO, the other AWS account, Zoho CRM, and geolocation enrichment jobs.
-- Aurora PostgreSQL stores normalized entities, joins, report-ready facts, feedback labels, and rule versions.
-- Optional Athena or Glue Data Catalog can query raw S3 for reconciliation and backfills.
+- AWS Glue Data Catalog stores table metadata for landed datasets.
+- Athena queries raw and refined S3 datasets with standard SQL.
+- Aurora PostgreSQL remains an optional later-stage store for hot normalized data and low-latency report workflows.
 
-Aurora is the better primary report database because the agent needs repeated entity lookup, joins across license/company/activation/usage tables, timeline comparisons, and auditability. S3 alone would be cheaper for raw files but awkward for interactive Teams questions.
+This project is starting with the cheaper, slower, more flexible path because the workload is queryable but not urgent. If the report experience later needs faster relational joins, Aurora can be added for the curated subset without changing the raw landing pattern.
 
 ## Project Layout
 

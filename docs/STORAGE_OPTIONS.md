@@ -1,8 +1,8 @@
 # Storage Options
 
-## Recommendation
+## Decision
 
-Start with `S3 + Glue Data Catalog + Athena` as the primary data store for incoming source batches.
+We are using `S3 + Glue Data Catalog + Athena` as the primary data store for incoming source batches.
 
 Why this is the best fit for the current need:
 
@@ -10,13 +10,19 @@ Why this is the best fit for the current need:
 - AWS Glue Data Catalog is a persistent metadata store for tables and can be used by Athena, with crawlers available to infer schema from landed files. [Glue User Guide](https://docs.aws.amazon.com/glue/latest/dg/components-overview.html)
 - Athena requires an S3 output location for query results, which fits naturally with an S3 landing zone design. [Athena User Guide](https://docs.aws.amazon.com/athena/latest/ug/creating-databases-prerequisites.html)
 
-## Best Current Path
+## Selected Path
 
 1. Land raw payloads in S3.
 2. Convert high-volume JSON to partitioned Parquet on a schedule.
 3. Catalog tables in Glue.
 4. Query with Athena.
 5. Promote only the hot, normalized subset into Aurora later if human-facing workflows need faster joins.
+
+Suggested first AWS names:
+
+- raw bucket: `axiom-license-violation-raw-us-east-1`
+- Athena results bucket or prefix: `s3://axiom-license-violation-athena-results-us-east-1/`
+- Glue database: `license_violation_data_lake`
 
 ## Options
 
@@ -51,7 +57,7 @@ AWS notes that Aurora is a fully managed relational engine compatible with Postg
 
 ### Option 3: Hybrid
 
-This is the long-term architecture I would choose for this project:
+This remains the likely long-term architecture for this project:
 
 - S3 is the raw source of truth.
 - Athena is the first query surface for broad investigations and ad hoc research.
@@ -73,5 +79,4 @@ Each batch writes:
 - `records.jsonl`
 - `manifest.json`
 
-This gives us an immediate receiving end today and a low-friction path to an S3 bucket tomorrow.
-
+This gives us an immediate receiving end today and a low-friction path to the selected S3 data lake tomorrow.

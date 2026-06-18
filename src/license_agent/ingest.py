@@ -112,7 +112,8 @@ def build_landing_zone(settings: LicenseAgentSettings) -> FilesystemLandingZone:
 
 def storage_recommendation(settings: LicenseAgentSettings) -> dict[str, object]:
     return {
-        "recommended_primary_store": "s3-athena-glue",
+        "selected_primary_store": "s3-athena-glue",
+        "decision_status": "selected-default",
         "reason": (
             "The workload is analytical, not urgent, and can tolerate batch-oriented reads. "
             "That favors cheap object storage and serverless SQL over a continuously running relational cluster."
