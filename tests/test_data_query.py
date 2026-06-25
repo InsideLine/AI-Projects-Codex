@@ -3,7 +3,13 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase
 
-from license_agent.data_query import DataQueryService, extract_company_name, extract_license_text, looks_like_data_query
+from license_agent.data_query import (
+    DataQueryService,
+    extract_company_name,
+    extract_license_text,
+    extract_usage_company_name,
+    looks_like_data_query,
+)
 from license_agent.settings import LicenseAgentSettings
 
 
@@ -165,6 +171,24 @@ class DataQueryServiceTests(TestCase):
             extract_company_name("Show linked records for active LinkTek licenses for Example Corp"),
             "Example Corp",
         )
+        self.assertEqual(
+            extract_company_name("Hi, do you have data on how many files Mediterranean Shipping Company actually ran?"),
+            "Mediterranean Shipping Company",
+        )
+
+    def test_usage_activity_query_reports_missing_warehouse(self) -> None:
+        service = DataQueryService(LicenseAgentSettings())
+        result = service.answer("Hi, do you have data on how many files Mediterranean Shipping Company actually ran?")
+
+        self.assertEqual(result.kind, "usage_activity_unavailable")
+        self.assertIn("Mediterranean Shipping Company", result.message)
+        self.assertIn("ProcessInfo usage warehouse is not connected", result.message)
+
+    def test_extract_usage_company_name(self) -> None:
+        self.assertEqual(
+            extract_usage_company_name("How many files Mediterranean Shipping Company actually ran?"),
+            "Mediterranean Shipping Company",
+        )
 
     def test_extract_license_text_from_chatty_question(self) -> None:
         self.assertEqual(extract_license_text("Show records linked to license id LTK-1234"), "LTK-1234")
@@ -174,3 +198,4 @@ class DataQueryServiceTests(TestCase):
         self.assertTrue(looks_like_data_query("Look up Hudson Housing in CRM"))
         self.assertTrue(looks_like_data_query("Show active LinkTek licenses for Example Corp"))
         self.assertTrue(looks_like_data_query("Show records linked to license id LTK-1234"))
+        self.assertTrue(looks_like_data_query("How many files Mediterranean Shipping Company actually ran?"))

@@ -52,6 +52,10 @@ class TeamsIntentTests(TestCase):
         intent = parse_intent("What are the strongest violation signals?")
         self.assertEqual(intent.kind, "data_query")
 
+    def test_parses_usage_question_as_data_query_not_company_report(self) -> None:
+        intent = parse_intent("Hi, do you have data on how many files Mediterranean Shipping Company actually ran?")
+        self.assertEqual(intent.kind, "data_query")
+
 
 class TeamsChatServiceTests(TestCase):
     def test_sync_report_job_completes_and_is_visible_in_history(self) -> None:
@@ -143,3 +147,14 @@ class TeamsChatServiceTests(TestCase):
             self.assertEqual(response["type"], "data_query")
             self.assertEqual(response["query_kind"], "signal_summary")
             self.assertIn("answered", response["message"])
+
+    def test_report_status_clarifies_when_live_data_is_not_connected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = LicenseAgentSettings(
+                app_db_path=str(Path(temp_dir) / "app.sqlite3"),
+                report_output_root=str(Path(temp_dir) / "reports"),
+            )
+            service = TeamsChatService(settings, run_async=False)
+            request = service.handle_message("company Example Corp", "analyst@example.com")
+            response = service.handle_message(f"status {request['job_id']}", "analyst@example.com")
+            self.assertIn("not enough connected data", response["message"])

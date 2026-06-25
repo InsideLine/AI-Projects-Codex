@@ -240,10 +240,17 @@ class TeamsChatService:
         )
         if job.get("status") == "completed" and isinstance(job.get("result"), dict):
             result = job["result"]
-            message += (
-                f" Evaluation: {result.get('evaluation', 'unknown')}. "
-                f"Findings: {result.get('finding_count', 0)}."
-            )
+            if result.get("data_connected") is False:
+                message += (
+                    " I completed the placeholder workflow, but I could not verify the company/license against live "
+                    "activation or usage data because the warehouse query layer is not connected yet. "
+                    "Treat this as `not enough connected data`, not as a clean result."
+                )
+            else:
+                message += (
+                    f" Evaluation: {result.get('evaluation', 'unknown')}. "
+                    f"Findings: {result.get('finding_count', 0)}."
+                )
         if job.get("status") == "failed" and job.get("error_text"):
             message += f" Error: {job['error_text']}"
         return {"type": "job_status", "message": message, "job": job, "state": self.state(user_id)}
@@ -328,6 +335,7 @@ class TeamsChatService:
                 "findings": findings,
                 "activation_count": report.activation_count,
                 "usage_record_count": report.usage_record_count,
+                "data_connected": bool(report.activation_count or report.usage_record_count),
                 "note": (
                     "This job path is ready for Teams-style orchestration, memory, and reviewer feedback. "
                     "The live Athena or Aurora data loader still needs to be connected so completed jobs use the "
@@ -379,7 +387,7 @@ def parse_intent(text: str, *, last_job: dict[str, Any] | None = None) -> Parsed
     if looks_like_data_query(stripped):
         return ParsedIntent(kind="data_query", question=stripped)
 
-    company_match = re.search(r"\bcompany\s*[:#]?\s*(.+)$", stripped, flags=re.IGNORECASE)
+    company_match = re.search(r"^\s*company\s*[:#]?\s+(.+)$", stripped, flags=re.IGNORECASE)
     if company_match:
         return ParsedIntent(
             kind="report_request",

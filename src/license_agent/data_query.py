@@ -43,6 +43,8 @@ class DataQueryService:
 
     def answer(self, text: str) -> DataQueryResult:
         lower = text.lower()
+        if _asks_about_usage_activity(lower):
+            return self._answer_usage_activity(text)
         if _asks_about_linked_license_records(lower):
             return self._answer_linked_active_license_records(text)
         if _asks_about_active_linktek_licenses(lower):
@@ -59,11 +61,31 @@ class DataQueryService:
         return DataQueryResult(
             kind="unsupported_query",
             message=(
-                "I can answer questions about the SOLO signal review, violator overlap, dataset coverage, "
-                "and CRM company lookup. Try asking `what are the strongest violation signals?` or "
-                "`is Hudson Housing Capital LLC in the violator overlap?`."
+                "I can answer the parts of license-analysis data that are connected right now: SOLO signal review, "
+                "violator overlap, dataset coverage, and CRM lookup once Aurora is configured. I do not yet have "
+                "the live AWS usage warehouse connected in Teams."
             ),
             evidence={"query": text},
+        )
+
+    def _answer_usage_activity(self, text: str) -> DataQueryResult:
+        company_name = extract_company_name(text) or extract_usage_company_name(text)
+        subject = company_name or "that company/license"
+        return DataQueryResult(
+            kind="usage_activity_unavailable",
+            message=(
+                f"I understood this as an AWS usage question for `{subject}`. I cannot verify file/link counts from "
+                "Teams yet because the ProcessInfo usage warehouse is not connected to this deployed bot. Once the "
+                "AWS sync plus Athena/Glue query layer is enabled, this should answer from Links Processed, Files "
+                "Processed, File Size in Bytes, Process Name, run times, machine name, username, MAC address, and "
+                "related tenant/site fields."
+            ),
+            evidence={
+                "query": text,
+                "company_name": company_name,
+                "missing_dependency": "aws_usage_warehouse",
+                "expected_source": "ProcessInfo",
+            },
         )
 
     def _answer_dataset_summary(self) -> DataQueryResult:
@@ -528,7 +550,8 @@ class LinkedRecordConfig:
 def looks_like_data_query(text: str) -> bool:
     lower = text.lower()
     return (
-        _asks_about_active_linktek_licenses(lower)
+        _asks_about_usage_activity(lower)
+        or _asks_about_active_linktek_licenses(lower)
         or _asks_about_linked_license_records(lower)
         or _asks_about_crm(lower)
         or _asks_about_dataset(lower)
@@ -539,10 +562,27 @@ def looks_like_data_query(text: str) -> bool:
 
 def extract_company_name(text: str) -> str | None:
     patterns = (
+        r"\bhow\s+many\s+(?:files|links)\s+(?:did\s+)?(.+?)\s+(?:actually\s+)?(?:ran|run|processed)\b",
+        r"\b(?:files|links|usage|processes|runs?)\s+(?:for|by)\s+(.+?)(?:[?.!]*)$",
         r"\blicenses?\s+for\s+(.+?)(?:\s+in\s+crm|\s+in\s+the\s+crm|\s+in\s+aurora|\s+violator|\s+violation|\s+overlap|[?.!]*)$",
         r"\b(?:for|on|about|company|customer|account)\s+(.+?)(?:\s+in\s+crm|\s+in\s+the\s+crm|\s+in\s+aurora|\s+violator|\s+violation|\s+overlap|[?.!]*)$",
         r"\b(?:is|was)\s+(.+?)\s+(?:a\s+)?(?:violator|in\s+the\s+violator\s+overlap|in\s+the\s+overlap)",
         r"\b(?:look up|lookup|find|show)\s+(.+?)(?:\s+in\s+crm|\s+in\s+the\s+crm|\s+in\s+aurora|[?.!]*)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = _clean_company_name_fragment(match.group(1))
+            if value:
+                return value
+    return None
+
+
+def extract_usage_company_name(text: str) -> str | None:
+    patterns = (
+        r"\bhow\s+many\s+(?:files|links)\s+(.+?)\s+(?:actually\s+)?(?:ran|run|processed)\b",
+        r"\bwhat\s+did\s+(.+?)\s+(?:run|process)\b",
+        r"\b(?:usage|files|links|processes|runs?)\s+(?:for|by)\s+(.+?)(?:[?.!]*)$",
     )
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -576,6 +616,12 @@ def _asks_about_signals(lower: str) -> bool:
     return any(phrase in lower for phrase in phrases)
 
 
+def _asks_about_usage_activity(lower: str) -> bool:
+    usage_terms = ("files", "links", "bytes", "usage", "processed", "processes", "ran", "run")
+    context_terms = ("how many", "how much", "actually", "machine", "mac address", "tenant", "site")
+    return any(term in lower for term in usage_terms) and any(term in lower for term in context_terms)
+
+
 def _strip_crm_words(text: str) -> str:
     cleaned = re.sub(r"\b(?:crm|aurora|zoho|database|look up|lookup|find|show|account|customer)\b", "", text, flags=re.IGNORECASE)
     return _clean_company_name_fragment(cleaned)
@@ -583,6 +629,7 @@ def _strip_crm_words(text: str) -> str:
 
 def _clean_company_name_fragment(value: str) -> str:
     cleaned = value.strip(" .?!,;:`'\"")
+    cleaned = re.sub(r"^(do\s+you\s+have\s+data\s+on\s+)", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^(the\s+company\s+|company\s+|customer\s+|account\s+)", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
