@@ -31,6 +31,11 @@ class LicenseAgentSettings:
     chat_store_backend: str = "sqlite"
     chat_state_table_name: str | None = None
     teams_shared_secret: str | None = None
+    teams_app_secret_name: str | None = None
+    microsoft_app_id: str | None = None
+    microsoft_app_password: str | None = None
+    microsoft_app_type: str = "SingleTenant"
+    microsoft_app_tenant_id: str | None = None
     raw_s3_bucket: str | None = None
     report_s3_bucket: str | None = None
     athena_output_s3_uri: str | None = None
@@ -97,6 +102,11 @@ class LicenseAgentSettings:
             chat_store_backend=os.getenv("CHAT_STORE_BACKEND", "sqlite"),
             chat_state_table_name=_clean(os.getenv("CHAT_STATE_TABLE_NAME")),
             teams_shared_secret=_clean(os.getenv("TEAMS_SHARED_SECRET")),
+            teams_app_secret_name=_clean(os.getenv("TEAMS_APP_SECRET_NAME")),
+            microsoft_app_id=_clean(os.getenv("MICROSOFT_APP_ID")),
+            microsoft_app_password=_clean(os.getenv("MICROSOFT_APP_PASSWORD")),
+            microsoft_app_type=os.getenv("MICROSOFT_APP_TYPE", "SingleTenant"),
+            microsoft_app_tenant_id=_clean(os.getenv("MICROSOFT_APP_TENANT_ID")),
             raw_s3_bucket=_clean(os.getenv("RAW_S3_BUCKET")),
             report_s3_bucket=_clean(os.getenv("REPORT_S3_BUCKET")),
             athena_output_s3_uri=_clean(os.getenv("ATHENA_OUTPUT_S3_URI")),
@@ -193,6 +203,11 @@ class LicenseAgentSettings:
             chat_store_backend=self.chat_store_backend,
             chat_state_table_name=self.chat_state_table_name,
             teams_shared_secret=self.teams_shared_secret,
+            teams_app_secret_name=self.teams_app_secret_name,
+            microsoft_app_id=self.microsoft_app_id,
+            microsoft_app_password=self.microsoft_app_password,
+            microsoft_app_type=self.microsoft_app_type,
+            microsoft_app_tenant_id=self.microsoft_app_tenant_id,
             raw_s3_bucket=self.raw_s3_bucket,
             report_s3_bucket=self.report_s3_bucket,
             athena_output_s3_uri=self.athena_output_s3_uri,
@@ -270,6 +285,10 @@ class LicenseAgentSettings:
             "report_output_root": self.report_output_root,
             "chat_store_backend": self.chat_store_backend,
             "chat_state_table_name": self.chat_state_table_name,
+            "teams_app_secret_name": self.teams_app_secret_name,
+            "microsoft_app_id_configured": bool(self.microsoft_app_id or self.teams_app_secret_name),
+            "microsoft_app_type": self.microsoft_app_type,
+            "microsoft_app_tenant_id_configured": bool(self.microsoft_app_tenant_id or self.teams_app_secret_name),
             "raw_s3_bucket": self.raw_s3_bucket,
             "report_s3_bucket": self.report_s3_bucket,
             "athena_output_s3_uri": self.athena_output_s3_uri,

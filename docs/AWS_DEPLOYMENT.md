@@ -23,6 +23,7 @@ export RAW_DATA_BUCKET=globally-unique-license-agent-raw
 export REPORTS_BUCKET=globally-unique-license-agent-reports
 export ATHENA_RESULTS_BUCKET=globally-unique-license-agent-athena-results
 export TEAMS_SHARED_SECRET='long-random-secret'
+export TEAMS_APP_SECRET_NAME=license-violation-agent/ms-teams-app
 ```
 
 Optional:

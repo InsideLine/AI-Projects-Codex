@@ -8,6 +8,13 @@ from typing import Any
 
 from .agent import LicenseViolationAgent
 from .aws_chat_store import DynamoDbChatStore
+from .bot_framework import (
+    BotFrameworkActivityHandler,
+    BotFrameworkAuthError,
+    BotFrameworkReplyError,
+    is_bot_framework_activity,
+    load_bot_framework_credentials,
+)
 from .chat_store import ChatStore
 from .ingest import RawBatch, build_landing_zone, storage_recommendation
 from .models import InvestigationInput
@@ -48,6 +55,12 @@ class RawIngestRequest(BaseModel):
 def get_teams_service() -> TeamsChatService:
     settings, _ = safe_load_settings(".env")
     return TeamsChatService(settings, agent=agent, store=build_chat_store(settings))
+
+
+@lru_cache(maxsize=1)
+def get_bot_framework_handler() -> BotFrameworkActivityHandler:
+    settings, _ = safe_load_settings(".env")
+    return BotFrameworkActivityHandler(credentials=load_bot_framework_credentials(settings))
 
 
 def build_chat_store(settings):
@@ -156,8 +169,23 @@ def zoho_oauth_url() -> dict[str, str]:
 
 
 @app.post("/teams/message")
-def teams_message(message: TeamsMessage, request: Request) -> dict[str, object]:
+async def teams_message(request: Request) -> dict[str, object]:
+    payload = await request.json()
+    if is_bot_framework_activity(payload):
+        try:
+            with _teams_lock:
+                return get_bot_framework_handler().handle(
+                    activity=payload,
+                    authorization_header=request.headers.get("authorization"),
+                    teams_service=get_teams_service(),
+                )
+        except BotFrameworkAuthError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except BotFrameworkReplyError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     require_shared_secret(request)
+    message = TeamsMessage.model_validate(payload)
     with _teams_lock:
         return get_teams_service().handle_message(message.text, message.user_email)
 

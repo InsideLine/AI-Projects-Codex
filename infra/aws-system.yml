@@ -42,6 +42,10 @@ Parameters:
     Type: String
     NoEcho: true
     Description: Shared secret required in x-license-agent-secret for bot endpoints.
+  TeamsAppSecretName:
+    Type: String
+    Default: license-violation-agent/ms-teams-app
+    Description: Secrets Manager secret containing Microsoft Teams bot app credentials.
   AuroraDatabaseUrl:
     Type: String
     NoEcho: true
@@ -224,6 +228,10 @@ Resources:
                   - glue:GetTable
                   - glue:GetTables
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TeamsAppSecretName}*"
 
   ApiFunction:
     Type: AWS::Lambda::Function
@@ -244,6 +252,7 @@ Resources:
           APP_DB_PATH: /tmp/license-agent/app/license_agent.sqlite3
           REPORT_OUTPUT_ROOT: /tmp/license-agent/reports
           TEAMS_SHARED_SECRET: !Ref TeamsSharedSecret
+          TEAMS_APP_SECRET_NAME: !Ref TeamsAppSecretName
           RAW_S3_BUCKET: !Ref RawDataBucket
           REPORT_S3_BUCKET: !Ref ReportsBucket
           ATHENA_OUTPUT_S3_URI: !Sub "s3://${AthenaResultsBucket}/"

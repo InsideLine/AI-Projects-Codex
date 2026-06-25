@@ -21,6 +21,11 @@ class SettingsTests(TestCase):
                         "CHAT_STORE_BACKEND=dynamodb",
                         "CHAT_STATE_TABLE_NAME=chat-state",
                         "TEAMS_SHARED_SECRET=test-secret",
+                        "TEAMS_APP_SECRET_NAME=license-violation-agent/ms-teams-app",
+                        "MICROSOFT_APP_ID=app-id",
+                        "MICROSOFT_APP_PASSWORD=app-password",
+                        "MICROSOFT_APP_TYPE=SingleTenant",
+                        "MICROSOFT_APP_TENANT_ID=tenant-id",
                         "RAW_S3_BUCKET=raw-bucket",
                         "REPORT_S3_BUCKET=reports-bucket",
                         "AURORA_CRM_SCHEMA=crm",
@@ -64,6 +69,11 @@ class SettingsTests(TestCase):
             self.assertEqual(settings.chat_store_backend, "dynamodb")
             self.assertEqual(settings.chat_state_table_name, "chat-state")
             self.assertEqual(settings.teams_shared_secret, "test-secret")
+            self.assertEqual(settings.teams_app_secret_name, "license-violation-agent/ms-teams-app")
+            self.assertEqual(settings.microsoft_app_id, "app-id")
+            self.assertEqual(settings.microsoft_app_password, "app-password")
+            self.assertEqual(settings.microsoft_app_type, "SingleTenant")
+            self.assertEqual(settings.microsoft_app_tenant_id, "tenant-id")
             self.assertEqual(settings.raw_s3_bucket, "raw-bucket")
             self.assertEqual(settings.report_s3_bucket, "reports-bucket")
             self.assertEqual(settings.aurora_crm_schema, "crm")
