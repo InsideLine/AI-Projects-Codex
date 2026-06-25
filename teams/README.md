@@ -10,7 +10,7 @@ Teams app packages are zip files containing these files at the zip root:
 - `color.png`
 - `outline.png`
 
-The manifest is already configured with the bot app ID from AWS Secrets Manager and the deployed Lambda Function URL domain.
+The manifest is configured with the bot app ID from AWS Secrets Manager. It intentionally uses Teams manifest schema `1.17` because that matches the known-good manifest pattern used by the existing internal bot apps.
 
 ## Azure Bot messaging endpoint
 

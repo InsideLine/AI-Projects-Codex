@@ -1,21 +1,21 @@
 {
-  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
-  "manifestVersion": "1.29",
-  "version": "0.1.0",
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.1",
   "id": "8ad2e3a9-1766-4c08-a889-5ff65e7d79cc",
   "developer": {
     "name": "Axiom",
-    "websiteUrl": "https://www.axiomint.com",
-    "privacyUrl": "https://www.axiomint.com/privacy",
-    "termsOfUseUrl": "https://www.axiomint.com/terms"
+    "websiteUrl": "https://www.linktek.com",
+    "privacyUrl": "https://www.linktek.com",
+    "termsOfUseUrl": "https://www.linktek.com"
   },
   "name": {
     "short": "License Analyzer",
     "full": "License Violation Data Analyzer Agent"
   },
   "description": {
-    "short": "Investigates LinkTek license usage signals.",
-    "full": "Chat with the License Violation Data Analyzer Agent to request license and company usage reports, review possible license violation signals, and submit analyst feedback."
+    "short": "Ask questions about LinkTek license usage.",
+    "full": "An AI-powered bot that answers plain-English questions about LinkTek licenses, license usage, possible license violation signals, and investigation report history."
   },
   "icons": {
     "color": "color.png",
@@ -31,45 +31,16 @@
         "groupChat"
       ],
       "supportsFiles": false,
-      "isNotificationOnly": false,
-      "commandLists": [
-        {
-          "scopes": [
-            "personal",
-            "team",
-            "groupChat"
-          ],
-          "commands": [
-            {
-              "title": "help",
-              "description": "Show examples of supported license analysis requests."
-            },
-            {
-              "title": "history",
-              "description": "Show recent report requests and bot memory for the current user."
-            },
-            {
-              "title": "status",
-              "description": "Check the status of a queued license investigation report."
-            },
-            {
-              "title": "license",
-              "description": "Request a license usage investigation by license ID."
-            },
-            {
-              "title": "company",
-              "description": "Request a license usage investigation by company name."
-            },
-            {
-              "title": "feedback",
-              "description": "Record reviewer feedback on a report finding."
-            }
-          ]
-        }
-      ]
+      "isNotificationOnly": false
     }
   ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
   "validDomains": [
+    "linktek.com",
+    "botframework.com",
     "hebtz6gipu7gduf3luzuxlqfq40jmame.lambda-url.us-east-1.on.aws"
   ]
 }
