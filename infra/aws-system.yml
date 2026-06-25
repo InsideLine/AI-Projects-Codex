@@ -22,7 +22,22 @@ Parameters:
     Description: S3 object key for the zipped API Lambda package.
   SyncWorkerImageUri:
     Type: String
+    Default: not-configured
     Description: ECR image URI for the weekly DynamoDB sync worker.
+  EnableWeeklySync:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Set true after the sync worker image and source DynamoDB role are ready.
+  EnableGlueCatalog:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Set true when this deployment role has Glue create/delete permissions.
   TeamsSharedSecret:
     Type: String
     NoEcho: true
@@ -46,11 +61,17 @@ Parameters:
     Default: cron(0 7 ? * SUN *)
     Description: EventBridge schedule expression for the weekly AWS usage sync.
   SyncSubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
+    Type: CommaDelimitedList
+    Default: ""
     Description: Subnets for the scheduled Fargate sync task.
   SyncSecurityGroupIds:
-    Type: List<AWS::EC2::SecurityGroup::Id>
+    Type: CommaDelimitedList
+    Default: ""
     Description: Security groups for the scheduled Fargate sync task.
+
+Conditions:
+  CreateWeeklySync: !Equals [!Ref EnableWeeklySync, "true"]
+  CreateGlueCatalog: !Equals [!Ref EnableGlueCatalog, "true"]
 
 Resources:
   RawDataBucket:
@@ -114,6 +135,7 @@ Resources:
 
   GlueDatabase:
     Type: AWS::Glue::Database
+    Condition: CreateGlueCatalog
     Properties:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
@@ -122,6 +144,7 @@ Resources:
 
   GlueCrawlerRole:
     Type: AWS::IAM::Role
+    Condition: CreateGlueCatalog
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -147,6 +170,7 @@ Resources:
 
   RawDataCrawler:
     Type: AWS::Glue::Crawler
+    Condition: CreateGlueCatalog
     Properties:
       Name: !Sub "${ProjectName}-raw-crawler"
       Role: !GetAtt GlueCrawlerRole.Arn
@@ -215,14 +239,15 @@ Resources:
         S3Key: !Ref LambdaPackageKey
       Environment:
         Variables:
-          AWS_REGION: !Ref AWS::Region
           CHAT_STORE_BACKEND: dynamodb
           CHAT_STATE_TABLE_NAME: !Ref ChatStateTable
+          APP_DB_PATH: /tmp/license-agent/app/license_agent.sqlite3
+          REPORT_OUTPUT_ROOT: /tmp/license-agent/reports
           TEAMS_SHARED_SECRET: !Ref TeamsSharedSecret
           RAW_S3_BUCKET: !Ref RawDataBucket
           REPORT_S3_BUCKET: !Ref ReportsBucket
           ATHENA_OUTPUT_S3_URI: !Sub "s3://${AthenaResultsBucket}/"
-          GLUE_DATABASE_NAME: !Ref GlueDatabase
+          GLUE_DATABASE_NAME: !If [CreateGlueCatalog, !Ref GlueDatabase, ""]
           AURORA_DATABASE_URL: !Ref AuroraDatabaseUrl
 
   ApiFunctionUrl:
@@ -239,19 +264,30 @@ Resources:
       Principal: "*"
       FunctionUrlAuthType: NONE
 
+  ApiFunctionUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ApiFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
   SyncCluster:
     Type: AWS::ECS::Cluster
+    Condition: CreateWeeklySync
     Properties:
       ClusterName: !Sub "${ProjectName}-sync"
 
   SyncLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: CreateWeeklySync
     Properties:
       LogGroupName: !Sub "/ecs/${ProjectName}-dynamodb-sync"
       RetentionInDays: 30
 
   SyncExecutionRole:
     Type: AWS::IAM::Role
+    Condition: CreateWeeklySync
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -265,6 +301,7 @@ Resources:
 
   SyncTaskRole:
     Type: AWS::IAM::Role
+    Condition: CreateWeeklySync
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -297,6 +334,7 @@ Resources:
 
   SyncTaskDefinition:
     Type: AWS::ECS::TaskDefinition
+    Condition: CreateWeeklySync
     Properties:
       Family: !Sub "${ProjectName}-dynamodb-sync"
       Cpu: "4096"
@@ -336,6 +374,7 @@ Resources:
 
   SyncEventsRole:
     Type: AWS::IAM::Role
+    Condition: CreateWeeklySync
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -360,6 +399,7 @@ Resources:
 
   WeeklySyncRule:
     Type: AWS::Events::Rule
+    Condition: CreateWeeklySync
     Properties:
       Name: !Sub "${ProjectName}-weekly-dynamodb-sync"
       ScheduleExpression: !Ref WeeklySyncScheduleExpression
@@ -389,6 +429,6 @@ Outputs:
   ReportsBucket:
     Value: !Ref ReportsBucket
   GlueDatabaseName:
-    Value: !Ref GlueDatabase
+    Value: !If [CreateGlueCatalog, !Ref GlueDatabase, disabled]
   WeeklySyncRuleName:
-    Value: !Ref WeeklySyncRule
+    Value: !If [CreateWeeklySync, !Ref WeeklySyncRule, disabled]

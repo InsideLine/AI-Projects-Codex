@@ -22,20 +22,24 @@ export ARTIFACT_BUCKET=existing-deploy-artifact-bucket
 export RAW_DATA_BUCKET=globally-unique-license-agent-raw
 export REPORTS_BUCKET=globally-unique-license-agent-reports
 export ATHENA_RESULTS_BUCKET=globally-unique-license-agent-athena-results
-export SYNC_WORKER_IMAGE_URI=123456789012.dkr.ecr.us-east-1.amazonaws.com/license-agent-sync:latest
 export TEAMS_SHARED_SECRET='long-random-secret'
-export SYNC_SUBNET_IDS=subnet-abc,subnet-def
-export SYNC_SECURITY_GROUP_IDS=sg-abc
 ```
 
 Optional:
 
 ```bash
 export AURORA_DATABASE_URL='postgresql://...'
+export ENABLE_GLUE_CATALOG=false
+export ENABLE_WEEKLY_SYNC=false
+export SYNC_WORKER_IMAGE_URI=123456789012.dkr.ecr.us-east-1.amazonaws.com/license-agent-sync:latest
+export SYNC_SUBNET_IDS=subnet-abc,subnet-def
+export SYNC_SECURITY_GROUP_IDS=sg-abc
 export DYNAMODB_SOURCE_ROLE_ARN='arn:aws:iam::<source-account-id>:role/<role-name>'
 export DYNAMODB_SOURCE_EXTERNAL_ID='external-id-if-required'
 export WEEKLY_SYNC_SCHEDULE_EXPRESSION='cron(0 7 ? * SUN *)'
 ```
+
+Leave `ENABLE_GLUE_CATALOG=false` until the deployment role has Glue create/delete permissions. Leave `ENABLE_WEEKLY_SYNC=false` until the worker image is pushed and the source-account DynamoDB role is available.
 
 ## Weekly AWS Usage Sync
 

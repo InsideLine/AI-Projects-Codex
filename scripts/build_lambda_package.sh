@@ -8,8 +8,16 @@ ZIP_PATH="${DIST_DIR}/license-agent-api.zip"
 
 rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}"
+rm -f "${ZIP_PATH}"
 
-python3 -m pip install --upgrade -r "${ROOT_DIR}/requirements-api.txt" -t "${BUILD_DIR}"
+python3 -m pip install --upgrade \
+  --platform manylinux2014_x86_64 \
+  --implementation cp \
+  --python-version 3.12 \
+  --abi cp312 \
+  --only-binary=:all: \
+  -r "${ROOT_DIR}/requirements-api.txt" \
+  -t "${BUILD_DIR}" >&2
 cp -R "${ROOT_DIR}/src/license_agent" "${BUILD_DIR}/license_agent"
 
 cd "${BUILD_DIR}"
