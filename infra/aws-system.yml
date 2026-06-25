@@ -1,0 +1,394 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: License Violation Data Analyzer Agent API, storage, catalog, and weekly AWS usage sync.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: license-violation-agent
+  RawDataBucketName:
+    Type: String
+    Description: Globally unique S3 bucket for raw DynamoDB/SOLO/CRM landing data.
+  ReportsBucketName:
+    Type: String
+    Description: Globally unique S3 bucket for generated report artifacts.
+  AthenaResultsBucketName:
+    Type: String
+    Description: Globally unique S3 bucket for Athena query results.
+  LambdaPackageBucket:
+    Type: String
+    Description: S3 bucket containing the zipped API Lambda package.
+  LambdaPackageKey:
+    Type: String
+    Description: S3 object key for the zipped API Lambda package.
+  SyncWorkerImageUri:
+    Type: String
+    Description: ECR image URI for the weekly DynamoDB sync worker.
+  TeamsSharedSecret:
+    Type: String
+    NoEcho: true
+    Description: Shared secret required in x-license-agent-secret for bot endpoints.
+  AuroraDatabaseUrl:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional Aurora PostgreSQL URL for CRM active-license lookups.
+  DynamoDBSourceRoleArn:
+    Type: String
+    Default: ""
+    Description: Optional cross-account IAM role ARN to assume before scanning ProcessInfo, SiteInfo, and TenantInfo.
+  DynamoDBSourceExternalId:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Optional external ID for the cross-account DynamoDB role.
+  WeeklySyncScheduleExpression:
+    Type: String
+    Default: cron(0 7 ? * SUN *)
+    Description: EventBridge schedule expression for the weekly AWS usage sync.
+  SyncSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the scheduled Fargate sync task.
+  SyncSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security groups for the scheduled Fargate sync task.
+
+Resources:
+  RawDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref RawDataBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ReportsBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref AthenaResultsBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ChatStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "${ProjectName}_data_lake"
+        Description: Raw and refined datasets for license violation analysis.
+
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: RawBucketRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RawDataBucket.Arn
+                  - !Sub "${RawDataBucket.Arn}/*"
+
+  RawDataCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "${ProjectName}-raw-crawler"
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${RawDataBucket}/raw/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AppDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt ChatStateTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RawDataBucket.Arn
+                  - !Sub "${RawDataBucket.Arn}/*"
+                  - !GetAtt ReportsBucket.Arn
+                  - !Sub "${ReportsBucket.Arn}/*"
+                  - !GetAtt AthenaResultsBucket.Arn
+                  - !Sub "${AthenaResultsBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTables
+                Resource: "*"
+
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-api"
+      Runtime: python3.12
+      Handler: license_agent.lambda_handler.handler
+      Role: !GetAtt ApiRole.Arn
+      Timeout: 60
+      MemorySize: 1024
+      Code:
+        S3Bucket: !Ref LambdaPackageBucket
+        S3Key: !Ref LambdaPackageKey
+      Environment:
+        Variables:
+          AWS_REGION: !Ref AWS::Region
+          CHAT_STORE_BACKEND: dynamodb
+          CHAT_STATE_TABLE_NAME: !Ref ChatStateTable
+          TEAMS_SHARED_SECRET: !Ref TeamsSharedSecret
+          RAW_S3_BUCKET: !Ref RawDataBucket
+          REPORT_S3_BUCKET: !Ref ReportsBucket
+          ATHENA_OUTPUT_S3_URI: !Sub "s3://${AthenaResultsBucket}/"
+          GLUE_DATABASE_NAME: !Ref GlueDatabase
+          AURORA_DATABASE_URL: !Ref AuroraDatabaseUrl
+
+  ApiFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !Ref ApiFunction
+
+  ApiFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref ApiFunction
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  SyncCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-sync"
+
+  SyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}-dynamodb-sync"
+      RetentionInDays: 30
+
+  SyncExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  SyncTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SyncDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RawDataBucket.Arn
+                  - !Sub "${RawDataBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeTable
+                  - dynamodb:Scan
+                Resource: "*"
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: "*"
+
+  SyncTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-dynamodb-sync"
+      Cpu: "4096"
+      Memory: "8192"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt SyncExecutionRole.Arn
+      TaskRoleArn: !GetAtt SyncTaskRole.Arn
+      ContainerDefinitions:
+        - Name: dynamodb-sync
+          Image: !Ref SyncWorkerImageUri
+          Essential: true
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: RAW_S3_BUCKET
+              Value: !Ref RawDataBucket
+            - Name: DYNAMODB_SOURCE_TABLES
+              Value: ProcessInfo,SiteInfo,TenantInfo
+            - Name: DYNAMODB_SOURCE_SYSTEM
+              Value: aws_dynamodb_weekly
+            - Name: DYNAMODB_SCAN_PAGE_LIMIT
+              Value: "1000"
+            - Name: DYNAMODB_PARALLEL_SEGMENTS
+              Value: "8"
+            - Name: DYNAMODB_SOURCE_ROLE_ARN
+              Value: !Ref DynamoDBSourceRoleArn
+            - Name: DYNAMODB_SOURCE_EXTERNAL_ID
+              Value: !Ref DynamoDBSourceExternalId
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref SyncLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: sync
+
+  SyncEventsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunSyncTask
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Ref SyncTaskDefinition
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt SyncExecutionRole.Arn
+                  - !GetAtt SyncTaskRole.Arn
+
+  WeeklySyncRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-weekly-dynamodb-sync"
+      ScheduleExpression: !Ref WeeklySyncScheduleExpression
+      State: ENABLED
+      Targets:
+        - Id: WeeklyDynamoDbSync
+          Arn: !GetAtt SyncCluster.Arn
+          RoleArn: !GetAtt SyncEventsRole.Arn
+          EcsParameters:
+            TaskDefinitionArn: !Ref SyncTaskDefinition
+            LaunchType: FARGATE
+            PlatformVersion: LATEST
+            NetworkConfiguration:
+              AwsVpcConfiguration:
+                AssignPublicIp: ENABLED
+                Subnets: !Ref SyncSubnetIds
+                SecurityGroups: !Ref SyncSecurityGroupIds
+
+Outputs:
+  BotEndpointBaseUrl:
+    Description: Lambda Function URL base. Teams relay should POST to /teams/message below this URL.
+    Value: !GetAtt ApiFunctionUrl.FunctionUrl
+  ChatStateTableName:
+    Value: !Ref ChatStateTable
+  RawDataBucket:
+    Value: !Ref RawDataBucket
+  ReportsBucket:
+    Value: !Ref ReportsBucket
+  GlueDatabaseName:
+    Value: !Ref GlueDatabase
+  WeeklySyncRuleName:
+    Value: !Ref WeeklySyncRule

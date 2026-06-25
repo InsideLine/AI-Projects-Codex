@@ -106,7 +106,102 @@ class FilesystemLandingZone:
         }
 
 
+class S3LandingZone:
+    def __init__(self, bucket: str, *, prefix: str = "raw", s3_client: Any | None = None) -> None:
+        if not bucket.strip():
+            raise IngestionError("S3 landing zone bucket is required.")
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+        if s3_client is None:
+            try:
+                import boto3
+            except ImportError as exc:  # pragma: no cover
+                raise IngestionError("boto3 is required to use S3LandingZone.") from exc
+            s3_client = boto3.client("s3")
+        self.s3_client = s3_client
+
+    def persist(self, batch: RawBatch) -> PersistedBatch:
+        if not batch.source_system.strip():
+            raise IngestionError("source_system is required.")
+        if not batch.dataset.strip():
+            raise IngestionError("dataset is required.")
+
+        received_at = datetime.now(timezone.utc)
+        batch_id = uuid4().hex
+        source_slug = _slugify(batch.source_system)
+        dataset_slug = _slugify(batch.dataset)
+        day_prefix = received_at.strftime("%Y/%m/%d")
+        key_prefix = "/".join(
+            item for item in (self.prefix, source_slug, dataset_slug, day_prefix, batch_id) if item
+        )
+        records_key = f"{key_prefix}/records.jsonl"
+        manifest_key = f"{key_prefix}/manifest.json"
+
+        digest = sha256()
+        lines: list[str] = []
+        for record in batch.records:
+            line = json.dumps(record, sort_keys=True)
+            lines.append(line)
+            digest.update(line.encode("utf-8"))
+            digest.update(b"\n")
+        records_body = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+        sha256_hex = digest.hexdigest()
+
+        records_uri = f"s3://{self.bucket}/{records_key}"
+        manifest_uri = f"s3://{self.bucket}/{manifest_key}"
+        manifest = {
+            "batch_id": batch_id,
+            "source_system": batch.source_system,
+            "dataset": batch.dataset,
+            "record_count": len(batch.records),
+            "received_at": received_at.isoformat(),
+            "extracted_at": batch.extracted_at.isoformat() if batch.extracted_at else None,
+            "source_account": batch.source_account,
+            "schema_version": batch.schema_version,
+            "cursor": batch.cursor,
+            "notes": batch.notes,
+            "records_path": records_uri,
+            "sha256_hex": sha256_hex,
+        }
+
+        self.s3_client.put_object(
+            Bucket=self.bucket,
+            Key=records_key,
+            Body=records_body,
+            ContentType="application/x-ndjson",
+            ServerSideEncryption="AES256",
+        )
+        self.s3_client.put_object(
+            Bucket=self.bucket,
+            Key=manifest_key,
+            Body=json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
+            ContentType="application/json",
+            ServerSideEncryption="AES256",
+        )
+
+        return PersistedBatch(
+            batch_id=batch_id,
+            source_system=batch.source_system,
+            dataset=batch.dataset,
+            record_count=len(batch.records),
+            manifest_path=manifest_uri,
+            records_path=records_uri,
+            sha256_hex=sha256_hex,
+            received_at=received_at,
+        )
+
+    def health(self) -> dict[str, object]:
+        return {
+            "bucket": self.bucket,
+            "prefix": self.prefix,
+            "exists": True,
+            "writable": True,
+        }
+
+
 def build_landing_zone(settings: LicenseAgentSettings) -> FilesystemLandingZone:
+    if settings.raw_s3_bucket:
+        return S3LandingZone(settings.raw_s3_bucket)
     return FilesystemLandingZone(settings.ingest_raw_root)
 
 

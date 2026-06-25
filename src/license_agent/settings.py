@@ -26,10 +26,39 @@ class LicenseAgentSettings:
     aws_profile: str | None = None
     aws_cli_path: str | None = None
     ingest_raw_root: str = "local_data/raw"
+    app_db_path: str = "local_data/app/license_agent.sqlite3"
+    report_output_root: str = "local_data/reports"
+    chat_store_backend: str = "sqlite"
+    chat_state_table_name: str | None = None
+    teams_shared_secret: str | None = None
     raw_s3_bucket: str | None = None
+    report_s3_bucket: str | None = None
     athena_output_s3_uri: str | None = None
     glue_database_name: str | None = None
     aurora_database_url: str | None = None
+    aurora_crm_schema: str = "public"
+    aurora_crm_accounts_table: str = "accounts"
+    aurora_crm_company_name_column: str = "company_name"
+    aurora_crm_licenses_table: str = "customer_licenses"
+    aurora_crm_license_id_column: str = "id"
+    aurora_crm_license_code_column: str = "license_code"
+    aurora_crm_license_company_column: str = "company"
+    aurora_crm_license_entity_column: str = "entity"
+    aurora_crm_license_active_column: str = "active_license"
+    aurora_crm_license_expiry_column: str = "maintenance_expiry_date"
+    aurora_crm_linktek_entity_value: str = "LinkTek"
+    aurora_crm_srf_table: str = "sales_routing_forms"
+    aurora_crm_srf_license_column: str = "license_id"
+    aurora_crm_license_verifications_table: str = "license_verifications"
+    aurora_crm_license_verifications_license_column: str = "existing_license_record"
+    aurora_crm_quote_line_items_table: str = "quote_line_item_sets"
+    aurora_crm_quote_line_items_license_column: str = "customer_license_record"
+    dynamodb_source_tables: str = "ProcessInfo,SiteInfo,TenantInfo"
+    dynamodb_source_system: str = "aws_dynamodb"
+    dynamodb_scan_page_limit: int = 1000
+    dynamodb_parallel_segments: int = 8
+    dynamodb_source_role_arn: str | None = None
+    dynamodb_source_external_id: str | None = None
     solo_credentials_secret_name: str | None = None
     solo_base_url: str = "https://secure.softwarekey.com/solo"
     solo_author_id: str | None = None
@@ -63,10 +92,48 @@ class LicenseAgentSettings:
             aws_profile=_clean(os.getenv("AWS_PROFILE")),
             aws_cli_path=_clean(os.getenv("AWS_CLI_PATH")),
             ingest_raw_root=os.getenv("INGEST_RAW_ROOT", "local_data/raw"),
+            app_db_path=os.getenv("APP_DB_PATH", "local_data/app/license_agent.sqlite3"),
+            report_output_root=os.getenv("REPORT_OUTPUT_ROOT", "local_data/reports"),
+            chat_store_backend=os.getenv("CHAT_STORE_BACKEND", "sqlite"),
+            chat_state_table_name=_clean(os.getenv("CHAT_STATE_TABLE_NAME")),
+            teams_shared_secret=_clean(os.getenv("TEAMS_SHARED_SECRET")),
             raw_s3_bucket=_clean(os.getenv("RAW_S3_BUCKET")),
+            report_s3_bucket=_clean(os.getenv("REPORT_S3_BUCKET")),
             athena_output_s3_uri=_clean(os.getenv("ATHENA_OUTPUT_S3_URI")),
             glue_database_name=_clean(os.getenv("GLUE_DATABASE_NAME")),
             aurora_database_url=_clean(os.getenv("AURORA_DATABASE_URL")),
+            aurora_crm_schema=os.getenv("AURORA_CRM_SCHEMA", "public"),
+            aurora_crm_accounts_table=os.getenv("AURORA_CRM_ACCOUNTS_TABLE", "accounts"),
+            aurora_crm_company_name_column=os.getenv("AURORA_CRM_COMPANY_NAME_COLUMN", "company_name"),
+            aurora_crm_licenses_table=os.getenv("AURORA_CRM_LICENSES_TABLE", "customer_licenses"),
+            aurora_crm_license_id_column=os.getenv("AURORA_CRM_LICENSE_ID_COLUMN", "id"),
+            aurora_crm_license_code_column=os.getenv("AURORA_CRM_LICENSE_CODE_COLUMN", "license_code"),
+            aurora_crm_license_company_column=os.getenv("AURORA_CRM_LICENSE_COMPANY_COLUMN", "company"),
+            aurora_crm_license_entity_column=os.getenv("AURORA_CRM_LICENSE_ENTITY_COLUMN", "entity"),
+            aurora_crm_license_active_column=os.getenv("AURORA_CRM_LICENSE_ACTIVE_COLUMN", "active_license"),
+            aurora_crm_license_expiry_column=os.getenv("AURORA_CRM_LICENSE_EXPIRY_COLUMN", "maintenance_expiry_date"),
+            aurora_crm_linktek_entity_value=os.getenv("AURORA_CRM_LINKTEK_ENTITY_VALUE", "LinkTek"),
+            aurora_crm_srf_table=os.getenv("AURORA_CRM_SRF_TABLE", "sales_routing_forms"),
+            aurora_crm_srf_license_column=os.getenv("AURORA_CRM_SRF_LICENSE_COLUMN", "license_id"),
+            aurora_crm_license_verifications_table=os.getenv(
+                "AURORA_CRM_LICENSE_VERIFICATIONS_TABLE",
+                "license_verifications",
+            ),
+            aurora_crm_license_verifications_license_column=os.getenv(
+                "AURORA_CRM_LICENSE_VERIFICATIONS_LICENSE_COLUMN",
+                "existing_license_record",
+            ),
+            aurora_crm_quote_line_items_table=os.getenv("AURORA_CRM_QUOTE_LINE_ITEMS_TABLE", "quote_line_item_sets"),
+            aurora_crm_quote_line_items_license_column=os.getenv(
+                "AURORA_CRM_QUOTE_LINE_ITEMS_LICENSE_COLUMN",
+                "customer_license_record",
+            ),
+            dynamodb_source_tables=os.getenv("DYNAMODB_SOURCE_TABLES", "ProcessInfo,SiteInfo,TenantInfo"),
+            dynamodb_source_system=os.getenv("DYNAMODB_SOURCE_SYSTEM", "aws_dynamodb"),
+            dynamodb_scan_page_limit=_int_env("DYNAMODB_SCAN_PAGE_LIMIT", 1000),
+            dynamodb_parallel_segments=_int_env("DYNAMODB_PARALLEL_SEGMENTS", 8),
+            dynamodb_source_role_arn=_clean(os.getenv("DYNAMODB_SOURCE_ROLE_ARN")),
+            dynamodb_source_external_id=_clean(os.getenv("DYNAMODB_SOURCE_EXTERNAL_ID")),
             solo_credentials_secret_name=_clean(os.getenv("SOLO_CREDENTIALS_SECRET_NAME")),
             solo_base_url=os.getenv("SOLO_BASE_URL", "https://secure.softwarekey.com/solo"),
             solo_author_id=_clean(os.getenv("SOLO_AUTHOR_ID")),
@@ -120,6 +187,40 @@ class LicenseAgentSettings:
             aws_region=self.aws_region,
             aws_profile=self.aws_profile,
             aws_cli_path=self.aws_cli_path,
+            ingest_raw_root=self.ingest_raw_root,
+            app_db_path=self.app_db_path,
+            report_output_root=self.report_output_root,
+            chat_store_backend=self.chat_store_backend,
+            chat_state_table_name=self.chat_state_table_name,
+            teams_shared_secret=self.teams_shared_secret,
+            raw_s3_bucket=self.raw_s3_bucket,
+            report_s3_bucket=self.report_s3_bucket,
+            athena_output_s3_uri=self.athena_output_s3_uri,
+            glue_database_name=self.glue_database_name,
+            aurora_database_url=self.aurora_database_url,
+            aurora_crm_schema=self.aurora_crm_schema,
+            aurora_crm_accounts_table=self.aurora_crm_accounts_table,
+            aurora_crm_company_name_column=self.aurora_crm_company_name_column,
+            aurora_crm_licenses_table=self.aurora_crm_licenses_table,
+            aurora_crm_license_id_column=self.aurora_crm_license_id_column,
+            aurora_crm_license_code_column=self.aurora_crm_license_code_column,
+            aurora_crm_license_company_column=self.aurora_crm_license_company_column,
+            aurora_crm_license_entity_column=self.aurora_crm_license_entity_column,
+            aurora_crm_license_active_column=self.aurora_crm_license_active_column,
+            aurora_crm_license_expiry_column=self.aurora_crm_license_expiry_column,
+            aurora_crm_linktek_entity_value=self.aurora_crm_linktek_entity_value,
+            aurora_crm_srf_table=self.aurora_crm_srf_table,
+            aurora_crm_srf_license_column=self.aurora_crm_srf_license_column,
+            aurora_crm_license_verifications_table=self.aurora_crm_license_verifications_table,
+            aurora_crm_license_verifications_license_column=self.aurora_crm_license_verifications_license_column,
+            aurora_crm_quote_line_items_table=self.aurora_crm_quote_line_items_table,
+            aurora_crm_quote_line_items_license_column=self.aurora_crm_quote_line_items_license_column,
+            dynamodb_source_tables=self.dynamodb_source_tables,
+            dynamodb_source_system=self.dynamodb_source_system,
+            dynamodb_scan_page_limit=self.dynamodb_scan_page_limit,
+            dynamodb_parallel_segments=self.dynamodb_parallel_segments,
+            dynamodb_source_role_arn=self.dynamodb_source_role_arn,
+            dynamodb_source_external_id=self.dynamodb_source_external_id,
             solo_credentials_secret_name=self.solo_credentials_secret_name,
             solo_base_url=_prefer(self.solo_base_url, solo_secret_payload.get("SOLO_BASE_URL"), "https://secure.softwarekey.com/solo"),
             solo_author_id=_prefer(self.solo_author_id, solo_secret_payload.get("SOLO_AUTHOR_ID")),
@@ -165,10 +266,28 @@ class LicenseAgentSettings:
     def ingest_status(self) -> dict[str, object]:
         return {
             "raw_root": self.ingest_raw_root,
+            "app_db_path": self.app_db_path,
+            "report_output_root": self.report_output_root,
+            "chat_store_backend": self.chat_store_backend,
+            "chat_state_table_name": self.chat_state_table_name,
             "raw_s3_bucket": self.raw_s3_bucket,
+            "report_s3_bucket": self.report_s3_bucket,
             "athena_output_s3_uri": self.athena_output_s3_uri,
             "glue_database_name": self.glue_database_name,
+            "dynamodb_source_tables": self.dynamodb_source_tables,
+            "dynamodb_source_system": self.dynamodb_source_system,
+            "dynamodb_scan_page_limit": self.dynamodb_scan_page_limit,
+            "dynamodb_parallel_segments": self.dynamodb_parallel_segments,
+            "dynamodb_source_role_arn_configured": bool(self.dynamodb_source_role_arn),
             "aurora_database_url_configured": bool(self.aurora_database_url),
+            "aurora_crm_schema": self.aurora_crm_schema,
+            "aurora_crm_accounts_table": self.aurora_crm_accounts_table,
+            "aurora_crm_company_name_column": self.aurora_crm_company_name_column,
+            "aurora_crm_licenses_table": self.aurora_crm_licenses_table,
+            "aurora_crm_license_company_column": self.aurora_crm_license_company_column,
+            "aurora_crm_license_active_column": self.aurora_crm_license_active_column,
+            "aurora_crm_license_expiry_column": self.aurora_crm_license_expiry_column,
+            "aurora_crm_linktek_entity_value": self.aurora_crm_linktek_entity_value,
         }
 
     def zoho_status(self) -> dict[str, object]:
@@ -217,3 +336,13 @@ def _prefer(current: str | None, secret_value: object, default: str | None = Non
     if isinstance(secret_value, str) and secret_value.strip():
         return secret_value.strip()
     return default
+
+
+def _int_env(key: str, default: int) -> int:
+    value = os.getenv(key)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default

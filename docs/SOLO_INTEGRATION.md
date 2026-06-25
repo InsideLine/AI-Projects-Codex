@@ -24,8 +24,10 @@ That maps directly to Python in [solo.py](/Users/joeyrogers/Documents/Axiom/Axio
 
 1. Start with programmatic report exports for bulk acquisition.
 2. Use XML License Service only for narrow record-level lookups or write operations.
-3. Cache raw SOLO exports into S3, then normalize into Aurora.
-4. Avoid calling SOLO live from user-facing Teams requests.
+3. Use `Export Licenses` as the main incremental sync feed and `Export Activation Data` as the activation-history feed.
+4. Prefer incremental weekly pulls for licenses using modified-date filtering when available.
+5. Cache raw SOLO exports into S3, then normalize into Athena-curated datasets and later Aurora only if needed.
+6. Avoid calling SOLO live from user-facing Teams requests.
 
 ## Why Reports First
 
@@ -36,6 +38,21 @@ The docs confirm:
 - output can be `Csv`, `Xls`, `XmlElements`, or `XmlParameters`
 
 That makes reports the best fit for scheduled batch ingestion.
+
+SoftwareKey support also confirmed that report pulls are metered as API/report activity rather than customer activation credits, and that a weekly bulk export pattern is the intended use case for this integration.
+
+## Confirmed Report Pair
+
+The current best-fit report pair is:
+
+- `Export Licenses`: main license/customer snapshot and incremental weekly sync source
+- `Export Activation Data`: activation-specific history, limited to one year per export window
+
+Recommended sync pattern:
+
+1. Pull `Export Licenses` weekly with a modified-date watermark.
+2. Pull `Export Activation Data` in rolling one-year windows for backfills, then on a regular cadence for current data.
+3. Land every raw export in dated S3 prefixes and preserve the original files.
 
 ## Important Gap
 
@@ -80,4 +97,3 @@ Suggested JSON payload:
 `GET /solo/health`
 
 This only verifies local configuration readiness. It does not make a live SOLO call.
-

@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 from .agent import LicenseViolationAgent
+from .aws_chat_store import DynamoDbChatStore
+from .chat_store import ChatStore
 from .ingest import RawBatch, build_landing_zone, storage_recommendation
 from .models import InvestigationInput
 from .settings import safe_load_settings
 from .solo import SoloClient
+from .teams_service import TeamsChatService
 from .zoho import ZohoClient, ZohoError
 
 try:
-    from fastapi import FastAPI
+    from fastapi import FastAPI, HTTPException, Request
     from pydantic import BaseModel
 except ImportError as exc:  # pragma: no cover
     raise RuntimeError("Install the api extra: python -m pip install -e '.[api]'") from exc
@@ -20,6 +25,7 @@ except ImportError as exc:  # pragma: no cover
 
 app = FastAPI(title="License Violation Data Analyzer Agent")
 agent = LicenseViolationAgent()
+_teams_lock = threading.Lock()
 
 
 class TeamsMessage(BaseModel):
@@ -36,6 +42,30 @@ class RawIngestRequest(BaseModel):
     schema_version: str | None = None
     cursor: str | None = None
     notes: str | None = None
+
+
+@lru_cache(maxsize=1)
+def get_teams_service() -> TeamsChatService:
+    settings, _ = safe_load_settings(".env")
+    return TeamsChatService(settings, agent=agent, store=build_chat_store(settings))
+
+
+def build_chat_store(settings):
+    backend = settings.chat_store_backend.strip().lower()
+    if backend == "dynamodb":
+        if not settings.chat_state_table_name:
+            raise RuntimeError("CHAT_STATE_TABLE_NAME is required when CHAT_STORE_BACKEND=dynamodb.")
+        return DynamoDbChatStore(settings.chat_state_table_name)
+    return ChatStore(settings.app_db_path)
+
+
+def require_shared_secret(request: Request) -> None:
+    settings, _ = safe_load_settings(".env")
+    if not settings.teams_shared_secret:
+        return
+    provided = request.headers.get("x-license-agent-secret", "")
+    if provided != settings.teams_shared_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @app.get("/health")
@@ -65,7 +95,8 @@ def ingest_health() -> dict[str, object]:
 
 
 @app.post("/ingest/raw-batch")
-def ingest_raw_batch(batch: RawIngestRequest) -> dict[str, object]:
+def ingest_raw_batch(batch: RawIngestRequest, request: Request) -> dict[str, object]:
+    require_shared_secret(request)
     settings, warning = safe_load_settings(".env")
     landing_zone = build_landing_zone(settings)
     persisted = landing_zone.persist(
@@ -125,24 +156,25 @@ def zoho_oauth_url() -> dict[str, str]:
 
 
 @app.post("/teams/message")
-def teams_message(message: TeamsMessage) -> dict[str, object]:
-    query = parse_subject(message.text)
-    report = agent.create_report(InvestigationInput(**query))
-    return {
-        "subject": report.subject,
-        "evaluation": report.evaluation,
-        "finding_count": len(report.findings),
-        "findings": [
-            {
-                "code": finding.code,
-                "title": finding.title,
-                "severity": finding.severity.value,
-                "detail": finding.detail,
-                "evidence": finding.evidence,
-            }
-            for finding in report.findings
-        ],
-    }
+def teams_message(message: TeamsMessage, request: Request) -> dict[str, object]:
+    require_shared_secret(request)
+    with _teams_lock:
+        return get_teams_service().handle_message(message.text, message.user_email)
+
+
+@app.get("/teams/state")
+def teams_state(request: Request, user_email: str | None = None) -> dict[str, object]:
+    require_shared_secret(request)
+    with _teams_lock:
+        return get_teams_service().state(user_email)
+
+
+@app.get("/teams/jobs/{job_id}")
+def teams_job(job_id: str, request: Request) -> dict[str, object]:
+    require_shared_secret(request)
+    with _teams_lock:
+        job = get_teams_service().get_job(job_id)
+    return {"job": job, "found": job is not None}
 
 
 def parse_subject(text: str) -> dict[str, str]:

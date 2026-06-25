@@ -14,7 +14,7 @@
 
 ## Runtime Components
 
-- Extract workers: scheduled jobs for SOLO, AWS, Zoho, and geolocation enrichment.
+- Extract workers: scheduled jobs for AWS, later SOLO, Zoho, and geolocation enrichment.
 - S3 landing zone: raw source-of-truth storage for incoming batches and exports.
 - AWS Glue Data Catalog: table metadata and crawler-managed discovery.
 - Athena: primary query surface for non-urgent analytical investigation work.
@@ -22,6 +22,18 @@
 - Agent API: service that accepts Teams requests and returns report summaries.
 - Report writer: produces report records and optionally PDF/HTML output.
 - Feedback processor: turns analyst review into labels and proposed rule changes.
+
+## AWS Deployment Shape
+
+- Bot API: AWS Lambda running the FastAPI app through Mangum.
+- Bot endpoint: Lambda Function URL, protected by `x-license-agent-secret` until Bot Framework JWT validation is wired.
+- Chat/job state: DynamoDB table keyed by `pk` and `sk`.
+- Raw data: encrypted S3 landing bucket.
+- Reports: encrypted S3 reports bucket.
+- Athena output: encrypted S3 query-results bucket.
+- Catalog: Glue database and crawler over raw S3 data.
+- AWS usage sync: weekly EventBridge schedule running an ECS/Fargate task.
+- SOLO sync: explicitly deferred; configuration remains reserved for a future scheduled report export.
 
 ## Current Decision
 

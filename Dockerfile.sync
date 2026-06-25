@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements-worker.txt pyproject.toml ./
+COPY src ./src
+
+RUN python -m pip install --no-cache-dir -r requirements-worker.txt \
+    && python -m pip install --no-cache-dir .
+
+CMD ["python", "-m", "license_agent.aws_sync_worker"]
