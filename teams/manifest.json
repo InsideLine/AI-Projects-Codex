@@ -1,0 +1,75 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.29",
+  "version": "0.1.0",
+  "id": "8ad2e3a9-1766-4c08-a889-5ff65e7d79cc",
+  "developer": {
+    "name": "Axiom",
+    "websiteUrl": "https://www.axiomint.com",
+    "privacyUrl": "https://www.axiomint.com/privacy",
+    "termsOfUseUrl": "https://www.axiomint.com/terms"
+  },
+  "name": {
+    "short": "License Analyzer",
+    "full": "License Violation Data Analyzer Agent"
+  },
+  "description": {
+    "short": "Investigates LinkTek license usage signals.",
+    "full": "Chat with the License Violation Data Analyzer Agent to request license and company usage reports, review possible license violation signals, and submit analyst feedback."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#2454A6",
+  "bots": [
+    {
+      "botId": "558c65b0-228d-43c1-99c4-3343b3ecdbb4",
+      "scopes": [
+        "personal",
+        "team",
+        "groupChat"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": [
+            "personal",
+            "team",
+            "groupChat"
+          ],
+          "commands": [
+            {
+              "title": "help",
+              "description": "Show examples of supported license analysis requests."
+            },
+            {
+              "title": "history",
+              "description": "Show recent report requests and bot memory for the current user."
+            },
+            {
+              "title": "status",
+              "description": "Check the status of a queued license investigation report."
+            },
+            {
+              "title": "license",
+              "description": "Request a license usage investigation by license ID."
+            },
+            {
+              "title": "company",
+              "description": "Request a license usage investigation by company name."
+            },
+            {
+              "title": "feedback",
+              "description": "Record reviewer feedback on a report finding."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "validDomains": [
+    "hebtz6gipu7gduf3luzuxlqfq40jmame.lambda-url.us-east-1.on.aws"
+  ]
+}
