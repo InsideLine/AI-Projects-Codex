@@ -57,6 +57,20 @@ class FakeAuroraClient:
         }
 
 
+class FakeUsageClient:
+    def __init__(self, match=None, error: str = "") -> None:
+        self.match = match
+        self.error = error
+        self.company_calls = []
+
+    def status(self) -> dict:
+        return {"configured": True}
+
+    def find_company(self, company_name: str) -> dict:
+        self.company_calls.append(company_name)
+        return {"configured": True, "error": self.error, "match": self.match}
+
+
 class DataQueryServiceTests(TestCase):
     def test_answers_signal_summary_from_latest_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -134,6 +148,49 @@ class DataQueryServiceTests(TestCase):
         self.assertIn("License Verification violator overlap", result.message)
         self.assertIn("2 activation", result.message)
 
+    def test_company_lookup_uses_curated_solo_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            analysis_root = Path(temp_dir) / "analysis"
+            report_dir = analysis_root / "20260624T154914Z"
+            report_dir.mkdir(parents=True)
+            summary_path = Path(temp_dir) / "solo_summary.json"
+            (report_dir / "cohort_report.json").write_text(
+                json.dumps({"license_verification_overlap_companies": [], "broad_srf_overlap_companies": []}),
+                encoding="utf-8",
+            )
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "companies": {
+                            "example": {
+                                "company_key": "example",
+                                "company_name": "Example Corp",
+                                "activations": 3,
+                                "successful_activations": 2,
+                                "rejected_activations": 1,
+                                "rejection_rate": 1 / 3,
+                                "unique_ips": 2,
+                                "unique_installations": 2,
+                                "unique_computers": 1,
+                                "deactivations": 0,
+                                "unique_licenses": 1,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            service = DataQueryService(
+                LicenseAgentSettings(solo_summary_local_path=str(summary_path)),
+                analysis_root=analysis_root,
+                solo_activation_root=Path(temp_dir) / "missing",
+            )
+            result = service.answer("Is Example Corp in the violator overlap?")
+
+        self.assertEqual(result.kind, "company_signal_lookup")
+        self.assertIn("3 activation", result.message)
+        self.assertIn("1 rejection", result.message)
+
     def test_crm_lookup_reports_when_aurora_unconfigured(self) -> None:
         service = DataQueryService(LicenseAgentSettings())
         result = service.answer("Look up Hudson Housing Capital LLC in CRM")
@@ -176,13 +233,37 @@ class DataQueryServiceTests(TestCase):
             "Mediterranean Shipping Company",
         )
 
-    def test_usage_activity_query_reports_missing_warehouse(self) -> None:
+    def test_usage_activity_query_reports_from_usage_summary(self) -> None:
+        usage_client = FakeUsageClient(
+            {
+                "company_name": "Mediterranean Shipping Company",
+                "files_processed": 12345,
+                "links_processed": 67890,
+                "file_size_gib": 12.5,
+                "run_count": 44,
+                "license_ids": ["66000000"],
+                "machine_count": 2,
+                "mac_count": 3,
+                "first_start_time": "2024-01-01 10:00:00",
+                "last_end_time": "2025-01-01 11:00:00",
+                "tasks": ["Inoculate", "Cure"],
+            }
+        )
+        service = DataQueryService(LicenseAgentSettings(), usage_client=usage_client)
+        result = service.answer("Hi, do you have data on how many files Mediterranean Shipping Company actually ran?")
+
+        self.assertEqual(result.kind, "usage_activity")
+        self.assertIn("Mediterranean Shipping Company", result.message)
+        self.assertIn("12,345 file", result.message)
+        self.assertEqual(usage_client.company_calls, ["Mediterranean Shipping Company"])
+
+    def test_usage_activity_query_reports_missing_summary(self) -> None:
         service = DataQueryService(LicenseAgentSettings())
         result = service.answer("Hi, do you have data on how many files Mediterranean Shipping Company actually ran?")
 
         self.assertEqual(result.kind, "usage_activity_unavailable")
         self.assertIn("Mediterranean Shipping Company", result.message)
-        self.assertIn("ProcessInfo usage warehouse is not connected", result.message)
+        self.assertIn("ProcessInfo usage summary has not been generated", result.message)
 
     def test_extract_usage_company_name(self) -> None:
         self.assertEqual(

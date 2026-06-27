@@ -40,7 +40,17 @@ class LicenseAgentSettings:
     report_s3_bucket: str | None = None
     athena_output_s3_uri: str | None = None
     glue_database_name: str | None = None
+    usage_summary_s3_key: str = "curated/aws_usage/company_usage_summary.json"
+    usage_summary_local_path: str | None = None
+    solo_summary_s3_key: str = "curated/solo_softwarekey/company_activation_summary.json"
+    solo_summary_local_path: str | None = None
+    geolite2_city_db_path: str | None = None
+    ip_geolocation_cache_s3_key: str = "curated/ip_geolocation/ip_geolocation_cache.json"
+    ip_geolocation_cache_local_path: str | None = None
     aurora_database_url: str | None = None
+    aurora_data_api_cluster_arn: str | None = None
+    aurora_data_api_secret_arn: str | None = None
+    aurora_data_api_database: str | None = None
     aurora_crm_schema: str = "public"
     aurora_crm_accounts_table: str = "accounts"
     aurora_crm_company_name_column: str = "company_name"
@@ -111,7 +121,28 @@ class LicenseAgentSettings:
             report_s3_bucket=_clean(os.getenv("REPORT_S3_BUCKET")),
             athena_output_s3_uri=_clean(os.getenv("ATHENA_OUTPUT_S3_URI")),
             glue_database_name=_clean(os.getenv("GLUE_DATABASE_NAME")),
+            usage_summary_s3_key=os.getenv(
+                "USAGE_SUMMARY_S3_KEY",
+                "curated/aws_usage/company_usage_summary.json",
+            ),
+            usage_summary_local_path=_clean(os.getenv("USAGE_SUMMARY_LOCAL_PATH")),
+            solo_summary_s3_key=os.getenv(
+                "SOLO_SUMMARY_S3_KEY",
+                "curated/solo_softwarekey/company_activation_summary.json",
+            ),
+            solo_summary_local_path=_clean(os.getenv("SOLO_SUMMARY_LOCAL_PATH")),
+            geolite2_city_db_path=_clean(os.getenv("GEOLITE2_CITY_DB_PATH")),
+            ip_geolocation_cache_s3_key=os.getenv(
+                "IP_GEOLOCATION_CACHE_S3_KEY",
+                "curated/ip_geolocation/ip_geolocation_cache.json",
+            ),
+            ip_geolocation_cache_local_path=_clean(os.getenv("IP_GEOLOCATION_CACHE_LOCAL_PATH")),
             aurora_database_url=_clean(os.getenv("AURORA_DATABASE_URL")),
+            aurora_data_api_cluster_arn=_clean(os.getenv("DB_CLUSTER_ARN"))
+            or _clean(os.getenv("AURORA_DATA_API_CLUSTER_ARN")),
+            aurora_data_api_secret_arn=_clean(os.getenv("DB_SECRET_ARN"))
+            or _clean(os.getenv("AURORA_DATA_API_SECRET_ARN")),
+            aurora_data_api_database=_clean(os.getenv("DB_NAME")) or _clean(os.getenv("AURORA_DATA_API_DATABASE")),
             aurora_crm_schema=os.getenv("AURORA_CRM_SCHEMA", "public"),
             aurora_crm_accounts_table=os.getenv("AURORA_CRM_ACCOUNTS_TABLE", "accounts"),
             aurora_crm_company_name_column=os.getenv("AURORA_CRM_COMPANY_NAME_COLUMN", "company_name"),
@@ -212,7 +243,17 @@ class LicenseAgentSettings:
             report_s3_bucket=self.report_s3_bucket,
             athena_output_s3_uri=self.athena_output_s3_uri,
             glue_database_name=self.glue_database_name,
+            usage_summary_s3_key=self.usage_summary_s3_key,
+            usage_summary_local_path=self.usage_summary_local_path,
+            solo_summary_s3_key=self.solo_summary_s3_key,
+            solo_summary_local_path=self.solo_summary_local_path,
+            geolite2_city_db_path=self.geolite2_city_db_path,
+            ip_geolocation_cache_s3_key=self.ip_geolocation_cache_s3_key,
+            ip_geolocation_cache_local_path=self.ip_geolocation_cache_local_path,
             aurora_database_url=self.aurora_database_url,
+            aurora_data_api_cluster_arn=self.aurora_data_api_cluster_arn,
+            aurora_data_api_secret_arn=self.aurora_data_api_secret_arn,
+            aurora_data_api_database=self.aurora_data_api_database,
             aurora_crm_schema=self.aurora_crm_schema,
             aurora_crm_accounts_table=self.aurora_crm_accounts_table,
             aurora_crm_company_name_column=self.aurora_crm_company_name_column,
@@ -293,6 +334,16 @@ class LicenseAgentSettings:
             "report_s3_bucket": self.report_s3_bucket,
             "athena_output_s3_uri": self.athena_output_s3_uri,
             "glue_database_name": self.glue_database_name,
+            "usage_summary_s3_key": self.usage_summary_s3_key,
+            "usage_summary_local_path": self.usage_summary_local_path,
+            "solo_summary_s3_key": self.solo_summary_s3_key,
+            "solo_summary_local_path": self.solo_summary_local_path,
+            "geolite2_city_db_path": self.geolite2_city_db_path,
+            "ip_geolocation_cache_s3_key": self.ip_geolocation_cache_s3_key,
+            "ip_geolocation_cache_local_path": self.ip_geolocation_cache_local_path,
+            "aurora_data_api_cluster_arn_configured": bool(self.aurora_data_api_cluster_arn),
+            "aurora_data_api_secret_arn_configured": bool(self.aurora_data_api_secret_arn),
+            "aurora_data_api_database": self.aurora_data_api_database,
             "dynamodb_source_tables": self.dynamodb_source_tables,
             "dynamodb_source_system": self.dynamodb_source_system,
             "dynamodb_scan_page_limit": self.dynamodb_scan_page_limit,

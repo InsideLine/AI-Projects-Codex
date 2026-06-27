@@ -243,6 +243,7 @@ def build_reply_activity(activity: dict[str, Any], text: str) -> dict[str, Any]:
         "recipient": activity.get("from") or {},
         "conversation": activity.get("conversation") or {},
         "replyToId": activity.get("id"),
+        "textFormat": "markdown",
         "text": text,
     }
     if activity.get("locale"):

@@ -54,7 +54,8 @@ class RawIngestRequest(BaseModel):
 @lru_cache(maxsize=1)
 def get_teams_service() -> TeamsChatService:
     settings, _ = safe_load_settings(".env")
-    return TeamsChatService(settings, agent=agent, store=build_chat_store(settings))
+    run_async = settings.chat_store_backend.strip().lower() != "dynamodb"
+    return TeamsChatService(settings, agent=agent, store=build_chat_store(settings), run_async=run_async)
 
 
 @lru_cache(maxsize=1)

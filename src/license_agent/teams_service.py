@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import threading
 from dataclasses import dataclass
@@ -8,9 +9,11 @@ from typing import Any
 
 from .agent import LicenseViolationAgent
 from .chat_store import ChatStore
+from .correlation_analysis import normalize_company_name
 from .data_query import DataQueryService, looks_like_data_query
 from .feedback import JsonFeedbackStore
 from .models import InvestigationInput
+from .report_artifacts import publish_word_report
 from .settings import LicenseAgentSettings
 
 
@@ -53,6 +56,11 @@ class TeamsChatService:
         stripped = text.strip()
         self.store.save_message(user_id, "user", stripped)
         last_job = self.store.last_completed_job(user_id)
+        clarification = self._resolve_pending_company_selection(user_id, stripped)
+        if clarification:
+            response = self._enqueue_report(user_id, "company", clarification)
+            self.store.save_message(user_id, "assistant", str(response.get("message", "")))
+            return response
         intent = parse_intent(stripped, last_job=last_job)
 
         if intent.kind == "feedback":
@@ -82,15 +90,17 @@ class TeamsChatService:
     def state(self, user_email: str | None = None) -> dict[str, Any]:
         user_id = (user_email or "anonymous").strip() or "anonymous"
         summary = self.store.user_summary(user_id)
+        data_query_status = self.data_query_service.runtime_status()
+        usage_summary_status = data_query_status.get("aws_usage_summary") or {}
         return {
             "user_id": user_id,
             "memory": summary,
             "runtime": {
                 "run_async": self.run_async,
-                "warehouse_backend_connected": False,
+                "warehouse_backend_connected": bool(usage_summary_status.get("configured")),
                 "report_output_root": self.settings.report_output_root,
                 "db_path": self.settings.app_db_path,
-                "data_query": self.data_query_service.runtime_status(),
+                "data_query": data_query_status,
             },
         }
 
@@ -199,6 +209,10 @@ class TeamsChatService:
         }
 
     def _enqueue_report(self, user_id: str, subject_type: str, subject_value: str) -> dict[str, Any]:
+        if subject_type == "company":
+            clarification = self._company_clarification_response(user_id, subject_value)
+            if clarification is not None:
+                return clarification
         payload = {"subject_type": subject_type, "subject_value": subject_value}
         job = self.store.create_job(
             user_id=user_id,
@@ -211,15 +225,13 @@ class TeamsChatService:
             thread = threading.Thread(target=self._process_report_job, args=(job["job_id"],), daemon=True)
             thread.start()
             message = (
-                f"I queued report job `{job['job_id']}` for {subject_type} `{subject_value}`. "
-                "Ask for `status {job_id}` in Teams to check progress."
+                f"I started report job {job['job_id']} for {subject_type} {subject_value}. "
+                "I am gathering the available license, usage, and CRM context now."
             ).replace("{job_id}", job["job_id"])
         else:
             self._process_report_job(job["job_id"])
-            message = (
-                f"I ran report job `{job['job_id']}` for {subject_type} `{subject_value}` "
-                "in local synchronous mode."
-            )
+            completed_job = self.store.get_job(job["job_id"]) or job
+            message = self._completed_report_message(completed_job)
         return {
             "type": "report_requested",
             "job_id": job["job_id"],
@@ -239,21 +251,43 @@ class TeamsChatService:
             f"Job `{job_id}` for {job['subject_type']} `{job['subject_value']}` is `{job['status']}`."
         )
         if job.get("status") == "completed" and isinstance(job.get("result"), dict):
-            result = job["result"]
-            if result.get("data_connected") is False:
-                message += (
-                    " I completed the placeholder workflow, but I could not verify the company/license against live "
-                    "activation or usage data because the warehouse query layer is not connected yet. "
-                    "Treat this as `not enough connected data`, not as a clean result."
-                )
-            else:
-                message += (
-                    f" Evaluation: {result.get('evaluation', 'unknown')}. "
-                    f"Findings: {result.get('finding_count', 0)}."
-                )
+            message = self._completed_report_message(job)
         if job.get("status") == "failed" and job.get("error_text"):
             message += f" Error: {job['error_text']}"
         return {"type": "job_status", "message": message, "job": job, "state": self.state(user_id)}
+
+    def _company_clarification_response(self, user_id: str, subject_value: str) -> dict[str, Any] | None:
+        usage_client = getattr(self.data_query_service, "usage_client", None)
+        if usage_client is None or not hasattr(usage_client, "find_company"):
+            return None
+        lookup = usage_client.find_company(subject_value)
+        if lookup.get("error") or lookup.get("match"):
+            return None
+        candidates = [
+            item for item in (lookup.get("candidates") or [])
+            if isinstance(item, dict) and item.get("company_name")
+        ]
+        if not candidates:
+            return None
+        self._save_pending_company_candidates(user_id, subject_value, candidates)
+        options = []
+        for index, item in enumerate(candidates[:5], start=1):
+            licenses = item.get("license_ids") or []
+            license_hint = f"; licenses: {', '.join(str(value) for value in licenses[:3])}" if licenses else ""
+            options.append(f"{index}. {item['company_name']} (match {float(item.get('score') or 0):.0%}{license_hint})")
+        message = (
+            f"I found multiple possible company matches for \"{subject_value}\". "
+            "Which one should I use for the report?\n\n"
+            + "\n".join(options)
+            + "\n\nReply with the number, the company name, or give me a license ID."
+        )
+        return {
+            "type": "company_clarification",
+            "message": message,
+            "requested_subject": subject_value,
+            "candidates": candidates[:5],
+            "state": self.state(user_id),
+        }
 
     def _record_feedback(self, user_id: str, intent: ParsedIntent) -> dict[str, Any]:
         latest_job = self.store.last_completed_job(user_id)
@@ -312,6 +346,12 @@ class TeamsChatService:
         try:
             subject_type = job["subject_type"]
             subject_value = job["subject_value"]
+            usage_result = self._build_usage_report_result(subject_type, subject_value)
+            if usage_result is not None:
+                usage_result = self._finalize_report_result(job_id, usage_result)
+                self.store.mark_completed(job_id, usage_result)
+                return
+
             investigation = InvestigationInput(
                 license_id=subject_value if subject_type == "license" else None,
                 company_name=subject_value if subject_type == "company" else None,
@@ -342,9 +382,231 @@ class TeamsChatService:
                     "compiled warehouse instead of an empty local investigation shell."
                 ),
             }
+            result = self._finalize_report_result(job_id, result)
             self.store.mark_completed(job_id, result)
         except Exception as exc:  # pragma: no cover
             self.store.mark_failed(job_id, f"{type(exc).__name__}: {exc}")
+
+    def _build_usage_report_result(self, subject_type: str, subject_value: str) -> dict[str, Any] | None:
+        usage_client = getattr(self.data_query_service, "usage_client", None)
+        if usage_client is None:
+            return None
+
+        if subject_type == "license" and hasattr(usage_client, "find_license"):
+            lookup = usage_client.find_license(subject_value)
+        elif subject_type == "company" and hasattr(usage_client, "find_company"):
+            lookup = usage_client.find_company(subject_value)
+        else:
+            return None
+
+        if lookup.get("error"):
+            raise RuntimeError(f"Usage summary lookup failed: {lookup['error']}")
+        summary = lookup.get("match")
+        if not summary:
+            return None
+        solo_context = self._build_solo_context(subject_type, subject_value, summary)
+        return build_usage_report_result(
+            subject_type,
+            subject_value,
+            summary,
+            lookup.get("summary_meta") or {},
+            crm_context=self._build_crm_context(subject_type, subject_value, summary),
+            solo_context=solo_context,
+            ip_geolocation_context=self._build_ip_geolocation_context(summary, solo_context=solo_context),
+        )
+
+    def _build_crm_context(self, subject_type: str, subject_value: str, summary: dict[str, Any]) -> dict[str, Any]:
+        aurora_client = getattr(self.data_query_service, "aurora_client", None)
+        if aurora_client is None:
+            return {"configured": False, "error": "", "status": {}}
+        status = aurora_client.status()
+        context: dict[str, Any] = {"configured": bool(status.get("configured")), "error": "", "status": status}
+        if not context["configured"]:
+            return context
+        company_name = str(summary.get("company_name") or (subject_value if subject_type == "company" else "")).strip()
+        license_text = subject_value if subject_type == "license" else None
+        usage_license_ids = [str(value).strip() for value in summary.get("license_ids") or [] if str(value).strip()]
+        try:
+            if company_name:
+                context["account_lookup"] = aurora_client.search_company(company_name, limit=3)
+            license_lookup = aurora_client.search_active_linktek_licenses(
+                company_name=company_name or None,
+                license_text=license_text,
+                limit=10,
+            )
+            lookup_scope = "active"
+            if not (license_lookup.get("rows") or []) and license_text is None:
+                for usage_license_id in usage_license_ids:
+                    license_lookup = aurora_client.search_active_linktek_licenses(
+                        company_name=None,
+                        license_text=usage_license_id,
+                        limit=10,
+                    )
+                    if license_lookup.get("rows"):
+                        lookup_scope = "active_by_usage_license"
+                        break
+            if not (license_lookup.get("rows") or []) and hasattr(aurora_client, "search_linktek_licenses"):
+                license_lookup = aurora_client.search_linktek_licenses(
+                    company_name=company_name or None,
+                    license_text=license_text,
+                    limit=10,
+                    active_only=False,
+                )
+                lookup_scope = "historical"
+            if not (license_lookup.get("rows") or []) and license_text is None and hasattr(aurora_client, "search_linktek_licenses"):
+                for usage_license_id in usage_license_ids:
+                    license_lookup = aurora_client.search_linktek_licenses(
+                        company_name=None,
+                        license_text=usage_license_id,
+                        limit=10,
+                        active_only=False,
+                    )
+                    if license_lookup.get("rows"):
+                        lookup_scope = "historical_by_usage_license"
+                        break
+            license_lookup["lookup_scope"] = lookup_scope
+            context["license_lookup"] = license_lookup
+            licenses = license_lookup.get("rows") or []
+            if licenses:
+                context["linked_records"] = aurora_client.linked_records_for_active_licenses(licenses, per_table_limit=5)
+        except Exception as exc:  # pragma: no cover - live Aurora
+            context["error"] = f"{type(exc).__name__}: {exc}"
+        return context
+
+    def _build_solo_context(self, subject_type: str, subject_value: str, summary: dict[str, Any]) -> dict[str, Any]:
+        company_name = str(summary.get("company_name") or (subject_value if subject_type == "company" else "")).strip()
+        usage_license_ids = [str(value).strip() for value in summary.get("license_ids") or [] if str(value).strip()]
+        if not company_name and not usage_license_ids:
+            return {"configured": False, "error": "", "metrics": None}
+        try:
+            metrics = None
+            if company_name:
+                company_key = normalize_company_name(company_name)
+                metrics = self.data_query_service._company_metrics(company_key)
+            if metrics is None and hasattr(self.data_query_service, "company_metrics_for_license_ids"):
+                metrics = self.data_query_service.company_metrics_for_license_ids(usage_license_ids)
+        except Exception as exc:
+            return {"configured": False, "error": f"{type(exc).__name__}: {exc}", "metrics": None}
+        if metrics is None:
+            return {"configured": False, "error": "", "metrics": None}
+        return {"configured": True, "error": "", "metrics": metrics.__dict__}
+
+    def _build_ip_geolocation_context(
+        self,
+        summary: dict[str, Any],
+        *,
+        solo_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        client = getattr(self.data_query_service, "ip_geolocation_client", None)
+        if client is None:
+            return {"configured": False, "error": "", "records": {}}
+        public_ips = [str(value) for value in summary.get("public_ips") or [] if str(value).strip()]
+        metrics = (solo_context or {}).get("metrics") or {}
+        activation_ips = [str(value) for value in metrics.get("activation_ips") or [] if str(value).strip()]
+        requested_ips = sorted(set(public_ips + activation_ips))
+        if not requested_ips:
+            return {"configured": False, "error": "", "records": {}, "public_ips": [], "activation_ips": []}
+        result = client.lookup_many(requested_ips)
+        result["public_ips"] = public_ips
+        result["activation_ips"] = activation_ips
+        return result
+
+    def _finalize_report_result(self, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        report_document = result.get("report_document")
+        if not isinstance(report_document, dict):
+            return result
+        try:
+            artifact = publish_word_report(self.settings, job_id=job_id, report_document=report_document)
+        except Exception as exc:  # pragma: no cover - live S3
+            result["artifact_error"] = f"{type(exc).__name__}: {exc}"
+            return result
+        if artifact:
+            result["word_report"] = artifact
+        return result
+
+    def _completed_report_message(self, job: dict[str, Any]) -> str:
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        report_text = str(result.get("report_text") or "").strip()
+        if not report_text:
+            if result.get("data_connected") is False:
+                report_text = (
+                    "I completed the report shell, but I could not verify this company/license against connected "
+                    "activation, usage, or CRM data yet. Treat this as not enough connected data, not as a clean result."
+                )
+            else:
+                report_text = (
+                    f"Evaluation: {result.get('evaluation', 'unknown')}. "
+                    f"Findings: {result.get('finding_count', 0)}."
+                )
+        message = f"Completed report job {job['job_id']}.\n\n{report_text}"
+        word_report = result.get("word_report") if isinstance(result, dict) else None
+        if isinstance(word_report, dict) and word_report.get("url"):
+            message += f"\n\n**Word report:** [Download DOCX]({word_report['url']})"
+        artifact_error = result.get("artifact_error") if isinstance(result, dict) else None
+        if artifact_error:
+            message += f"\n\nWord report could not be created yet: {artifact_error}"
+        return message
+
+    def _save_pending_company_candidates(
+        self,
+        user_id: str,
+        requested_subject: str,
+        candidates: list[dict[str, Any]],
+    ) -> None:
+        payload = {
+            "requested_subject": requested_subject,
+            "candidates": [
+                {
+                    "company_name": item.get("company_name"),
+                    "company_key": item.get("company_key"),
+                    "license_ids": item.get("license_ids") or [],
+                    "score": item.get("score"),
+                }
+                for item in candidates[:5]
+            ],
+        }
+        self.store.save_preference(
+            user_id,
+            "pending_company_clarification",
+            json.dumps(payload, sort_keys=True),
+            confidence=1.0,
+            source="company_search",
+        )
+
+    def _resolve_pending_company_selection(self, user_id: str, text: str) -> str | None:
+        pending = self._latest_pending_company_candidates(user_id)
+        if not pending:
+            return None
+        candidates = pending.get("candidates") or []
+        if not isinstance(candidates, list) or not candidates:
+            return None
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+        index = _selection_index(cleaned)
+        if index is not None and 0 <= index < len(candidates):
+            company_name = candidates[index].get("company_name")
+            return str(company_name) if company_name else None
+        cleaned_key = normalize_company_name(cleaned)
+        if not cleaned_key:
+            return None
+        for candidate in candidates:
+            candidate_name = str(candidate.get("company_name") or "")
+            candidate_key = normalize_company_name(candidate_name)
+            if cleaned_key == candidate_key or cleaned_key in candidate_key or candidate_key in cleaned_key:
+                return candidate_name
+        return None
+
+    def _latest_pending_company_candidates(self, user_id: str) -> dict[str, Any] | None:
+        for preference in self.store.get_preferences(user_id, limit=10):
+            if preference.get("preference_key") != "pending_company_clarification":
+                continue
+            try:
+                payload = json.loads(str(preference.get("preference_value") or "{}"))
+            except json.JSONDecodeError:
+                return None
+            return payload if isinstance(payload, dict) else None
+        return None
 
 
 def parse_intent(text: str, *, last_job: dict[str, Any] | None = None) -> ParsedIntent:
@@ -493,6 +755,18 @@ def _extract_company_subject(text: str) -> str | None:
 
 def _clean_company_subject(value: str) -> str:
     cleaned = re.sub(r"^(the\s+company\s+|company\s+)", "", value.strip(), flags=re.IGNORECASE)
+    cleaned = re.split(
+        r"(?:\.\s+|\?\s+|!\s+)(?:i\s+am|i'm|we\s+are|we're|looking|please)\b",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    cleaned = re.split(
+        r"\s+\b(?:i\s+am|i'm|we\s+are|we're)\s+looking\b",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
     cleaned = re.sub(
         r"\s+(might be violating(?: their license)?|may be violating(?: their license)?|is violating(?: their license)?)\s*$",
         "",
@@ -507,6 +781,896 @@ def _clean_company_subject(value: str) -> str:
     )
     cleaned = cleaned.strip(" .?!,;:")
     return cleaned
+
+
+def build_usage_report_result(
+    subject_type: str,
+    requested_subject: str,
+    summary: dict[str, Any],
+    summary_meta: dict[str, Any],
+    *,
+    crm_context: dict[str, Any] | None = None,
+    solo_context: dict[str, Any] | None = None,
+    ip_geolocation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    crm_context = crm_context or {}
+    solo_context = solo_context or {}
+    ip_geolocation_context = ip_geolocation_context or {}
+    findings = _usage_report_findings(
+        summary,
+        crm_context=crm_context,
+        solo_context=solo_context,
+        ip_geolocation_context=ip_geolocation_context,
+    )
+    evaluation = _usage_report_evaluation(findings)
+    report_document = _usage_report_document(
+        requested_subject=requested_subject,
+        subject_type=subject_type,
+        summary=summary,
+        findings=findings,
+        evaluation=evaluation,
+        summary_meta=summary_meta,
+        crm_context=crm_context,
+        solo_context=solo_context,
+        ip_geolocation_context=ip_geolocation_context,
+    )
+    report_text = _usage_report_text(report_document=report_document)
+    return {
+        "subject": summary.get("company_name") or requested_subject,
+        "requested_subject": requested_subject,
+        "subject_type": subject_type,
+        "evaluation": evaluation,
+        "finding_count": len(findings),
+        "findings": findings,
+        "activation_count": 0,
+        "usage_record_count": int(summary.get("run_count") or 0),
+        "total_links_processed": int(summary.get("links_processed") or 0),
+        "total_files_processed": int(summary.get("files_processed") or 0),
+        "total_file_size_bytes": int(summary.get("file_size_in_bytes") or 0),
+        "data_connected": True,
+        "data_sources": {
+            "aws_processinfo_summary": True,
+            "solo_activations": bool(solo_context.get("configured")),
+            "crm_entitlements": bool(crm_context.get("configured")),
+            "ip_geolocation": bool(ip_geolocation_context.get("records")),
+        },
+        "crm_context": crm_context,
+        "solo_context": solo_context,
+        "ip_geolocation_context": ip_geolocation_context,
+        "usage_summary": summary,
+        "summary_meta": summary_meta,
+        "report_document": report_document,
+        "report_text": report_text,
+        "note": (
+            "This report uses the connected AWS ProcessInfo usage summary plus any connected CRM, SOLO, and IP "
+            "geolocation context available at report time."
+        ),
+    }
+
+
+def _usage_report_findings(
+    summary: dict[str, Any],
+    *,
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+    ip_geolocation_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    machine_count = int(summary.get("machine_count") or 0)
+    mac_count = int(summary.get("mac_count") or 0)
+    public_ip_count = int(summary.get("public_ip_count") or 0)
+    file_size_gib = float(summary.get("file_size_gib") or 0)
+    files_processed = int(summary.get("files_processed") or 0)
+    links_processed = int(summary.get("links_processed") or 0)
+    personnel_signal = _licensed_personnel_signal(crm_context=crm_context, solo_context=solo_context)
+
+    if machine_count > 1:
+        findings.append(
+            {
+                "code": "multiple_machine_names",
+                "title": "License usage appears on multiple machine names",
+                "severity": "medium",
+                "detail": f"ProcessInfo shows {machine_count} machine names for this company/license.",
+                "evidence": {"machine_names": summary.get("machine_names") or []},
+            }
+        )
+    if mac_count > 1:
+        findings.append(
+            {
+                "code": "multiple_mac_addresses",
+                "title": "License usage appears on multiple MAC addresses",
+                "severity": "medium",
+                "detail": f"ProcessInfo shows {mac_count} MAC addresses for this company/license.",
+                "evidence": {"mac_addresses": summary.get("mac_addresses") or []},
+            }
+        )
+    if public_ip_count > 1:
+        ip_records = ip_geolocation_context.get("records") or {}
+        if ip_records:
+            ip_detail = (
+                f"ProcessInfo shows {public_ip_count} public IP addresses. GeoLite2 locations are listed in the "
+                "IP Geolocation Evidence section for comparison against the organization definition."
+            )
+        else:
+            ip_detail = (
+                f"ProcessInfo shows {public_ip_count} public IP addresses. This needs geolocation before it can "
+                "be treated as an organization-definition issue."
+            )
+        findings.append(
+            {
+                "code": "multiple_public_ips",
+                "title": "Usage appears from multiple public IP addresses",
+                "severity": "low",
+                "detail": ip_detail,
+                "evidence": {"public_ips": summary.get("public_ips") or []},
+            }
+        )
+    if personnel_signal.get("value"):
+        personnel = float(personnel_signal["value"])
+        gib_per_person = file_size_gib / personnel if personnel else 0
+        if gib_per_person >= 100:
+            findings.append(
+                {
+                    "code": "usage_over_eula_review_threshold",
+                    "title": "Usage exceeds EULA review threshold",
+                    "severity": "high",
+                    "detail": (
+                        f"ProcessInfo shows about {gib_per_person:,.2f} GiB per licensed person "
+                        f"({file_size_gib:,.2f} GiB / {personnel_signal['display_value']}), above the 100 GiB "
+                        "per licensed-person review threshold."
+                    ),
+                    "evidence": {
+                        "file_size_gib": file_size_gib,
+                        "licensed_personnel": personnel_signal["value"],
+                        "licensed_personnel_source": personnel_signal.get("source"),
+                        "gib_per_licensed_person": gib_per_person,
+                        "files_processed": files_processed,
+                        "links_processed": links_processed,
+                    },
+                }
+            )
+    elif file_size_gib >= 100:
+        findings.append(
+            {
+                "code": "high_total_file_volume",
+                "title": "High total file volume",
+                "severity": "medium",
+                "detail": (
+                    f"ProcessInfo shows about {file_size_gib:,.2f} GiB processed. The EULA 95% usage threshold "
+                    "still requires personnel entitlement from CRM before calculating GB per licensed person."
+                ),
+                "evidence": {
+                    "file_size_gib": file_size_gib,
+                    "files_processed": files_processed,
+                    "links_processed": links_processed,
+                },
+            }
+        )
+    if not solo_context.get("configured"):
+        findings.append(
+            {
+                "code": "missing_solo_activation_timeline",
+                "title": "SOLO activation timeline not found for this subject",
+                "severity": "low",
+                "detail": "This report cannot yet compare first activation date to first usage date.",
+                "evidence": {},
+            }
+        )
+    if not _has_crm_entitlement_context(crm_context):
+        findings.append(
+            {
+                "code": "missing_crm_entitlement",
+                "title": "CRM entitlement data not found for this subject",
+                "severity": "medium",
+                "detail": "Personnel licensed and organization definition are required before drawing EULA conclusions.",
+                "evidence": {},
+            }
+        )
+    if public_ip_count > 0 and not (ip_geolocation_context.get("records") or {}):
+        findings.append(
+            {
+                "code": "missing_ip_geolocation",
+                "title": "IP geolocation is not connected",
+                "severity": "low",
+                "detail": "Public IP addresses need city, region, and country enrichment before comparing usage geography to the organization definition.",
+                "evidence": {"public_ips": summary.get("public_ips") or []},
+            }
+        )
+    return findings
+
+
+def _usage_report_evaluation(findings: list[dict[str, Any]]) -> str:
+    finding_codes = {str(item.get("code") or "") for item in findings}
+    if "usage_over_eula_review_threshold" in finding_codes:
+        return "review recommended"
+    if {"multiple_machine_names", "multiple_mac_addresses"} <= finding_codes:
+        return "review recommended"
+    if "high_total_file_volume" in finding_codes:
+        return "review recommended"
+    return "usage data found; entitlement review needed"
+
+
+def _usage_report_text(
+    *,
+    report_document: dict[str, Any],
+) -> str:
+    sections = report_document.get("sections") or []
+    lines = [f"**{report_document.get('title', 'License Violation Review')}**"]
+    subtitle = report_document.get("subtitle")
+    if subtitle:
+        lines.append(str(subtitle))
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        lines.append("")
+        lines.append(f"**{section.get('heading', 'Section')}**")
+        for item in section.get("body") or []:
+            lines.append(str(item))
+        for item in section.get("bullets") or []:
+            lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
+def _usage_report_document(
+    *,
+    requested_subject: str,
+    subject_type: str,
+    summary: dict[str, Any],
+    findings: list[dict[str, Any]],
+    evaluation: str,
+    summary_meta: dict[str, Any],
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+    ip_geolocation_context: dict[str, Any],
+) -> dict[str, Any]:
+    company_name = summary.get("company_name") or requested_subject
+    license_ids = ", ".join(summary.get("license_ids") or []) or "unknown"
+    files_processed = _format_int(summary.get("files_processed"))
+    links_processed = _format_int(summary.get("links_processed"))
+    run_count = _format_int(summary.get("run_count"))
+    file_size_gib = float(summary.get("file_size_gib") or 0)
+    machine_count = _format_int(summary.get("machine_count"))
+    mac_count = _format_int(summary.get("mac_count"))
+    public_ip_count_raw = int(summary.get("public_ip_count") or 0)
+    public_ip_count = _format_int(public_ip_count_raw)
+    first_start = summary.get("first_start_time") or "unknown"
+    last_end = summary.get("last_end_time") or "unknown"
+    crm_section = _crm_report_section(crm_context)
+    solo_section = _solo_report_section(solo_context)
+    ip_section = _ip_geolocation_report_section(ip_geolocation_context, summary.get("public_ips") or [])
+    threshold_section = _eula_threshold_report_section(summary, crm_context, solo_context)
+    missing_items = _missing_data_items(
+        crm_context=crm_context,
+        solo_context=solo_context,
+        ip_geolocation_context=ip_geolocation_context,
+        public_ip_count=public_ip_count_raw,
+    )
+    findings_bullets = [
+        f"{item.get('title')}: {item.get('detail')}" for item in findings[:8]
+    ] or ["No material findings were generated from the connected sources."]
+    executive_bullets = _executive_summary_bullets(
+        company_name=company_name,
+        license_ids=license_ids,
+        file_size_gib=file_size_gib,
+        files_processed=files_processed,
+        links_processed=links_processed,
+        findings=findings,
+        crm_context=crm_context,
+        solo_context=solo_context,
+    )
+
+    sections = [
+        {
+            "heading": "Executive Summary",
+            "body": [
+                f"Evaluation: {evaluation}.",
+                "Investigative aid only; final EULA conclusions require human review.",
+            ],
+            "bullets": executive_bullets,
+        },
+        {
+            "heading": "AWS Usage Evidence",
+            "bullets": [
+                f"Files processed: {files_processed}",
+                f"Links processed: {links_processed}",
+                f"File size processed: about {file_size_gib:,.2f} GiB",
+                f"Run rows: {run_count}",
+                f"Usage date range: {first_start} through {last_end}",
+                f"Identity spread: {machine_count} machine name(s), {mac_count} MAC address(es), {public_ip_count} public IP address(es)",
+                f"Machine names: {_sample_list(summary.get('machine_names') or [])}",
+                f"MAC addresses: {_sample_list(summary.get('mac_addresses') or [])}",
+                f"Public IP addresses: {_sample_list(summary.get('public_ips') or [])}",
+            ],
+        },
+        threshold_section,
+        solo_section,
+        ip_section,
+        crm_section,
+        {
+            "heading": "Findings",
+            "bullets": findings_bullets,
+        },
+        {
+            "heading": "Recommended Next Review Steps",
+            "bullets": _recommended_next_steps(ip_geolocation_context),
+        },
+    ]
+    if missing_items:
+        sections.insert(
+            -1,
+            {
+                "heading": "Missing Data Needed For A Defensible EULA Opinion",
+                "bullets": missing_items,
+            },
+        )
+    return {
+        "title": f"License Violation Review: {company_name}",
+        "subtitle": f"Requested subject: {requested_subject}",
+        "subject": company_name,
+        "evaluation": evaluation,
+        "sections": sections,
+    }
+
+
+def _recommended_next_steps(ip_geolocation_context: dict[str, Any]) -> list[str]:
+    steps = [
+        "Review CRM organization scope against the SOLO and AWS usage geography.",
+        "Review License Verification and Sales Routing Form records for prior analyst conclusions or unresolved violation flags.",
+        "Use the GiB per entitlement-unit calculation as a review trigger, not as proof of a violation.",
+    ]
+    requested_ips = set(ip_geolocation_context.get("public_ips") or []) | set(ip_geolocation_context.get("activation_ips") or [])
+    if ip_geolocation_context.get("records"):
+        steps.append("Compare enriched IP cities/countries to the CRM organization definition.")
+    elif requested_ips:
+        steps.append("Backfill IP geolocation cache and compare enriched IP cities/countries to the CRM organization definition.")
+    else:
+        steps.append("No public IP geography was available in the connected usage data; use CRM scope and identity-spread evidence for this review.")
+    return steps
+
+
+def _eula_threshold_report_section(
+    summary: dict[str, Any],
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+) -> dict[str, Any]:
+    file_size_gib = float(summary.get("file_size_gib") or 0)
+    personnel_signal = _licensed_personnel_signal(crm_context=crm_context, solo_context=solo_context)
+    if not personnel_signal.get("value"):
+        return {
+            "heading": "EULA Usage Threshold",
+            "body": [
+                "The 100 GiB review threshold cannot be calculated until an entitlement denominator is available."
+            ],
+            "bullets": [
+                f"Usage volume available from AWS ProcessInfo: about {file_size_gib:,.2f} GiB",
+                "Entitlement denominator: not found in connected CRM, QLI, or SOLO context",
+            ],
+        }
+    personnel = float(personnel_signal["value"])
+    gib_per_person = file_size_gib / personnel if personnel else 0
+    threshold_status = "below"
+    if gib_per_person >= 100:
+        threshold_status = "at or above"
+    return {
+        "heading": "EULA Usage Threshold",
+        "body": [
+            f"The connected data calculates usage at about {gib_per_person:,.2f} GiB per entitlement unit, {threshold_status} the 100 GiB review threshold."
+        ],
+        "bullets": [
+            f"Usage volume: about {file_size_gib:,.2f} GiB",
+            f"Entitlement denominator: {personnel_signal['display_value']} from {personnel_signal['source']}",
+            "Threshold note: this is an investigative trigger, not by itself proof of a EULA violation.",
+        ],
+    }
+
+
+def _executive_summary_bullets(
+    *,
+    company_name: str,
+    license_ids: str,
+    file_size_gib: float,
+    files_processed: str,
+    links_processed: str,
+    findings: list[dict[str, Any]],
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+) -> list[str]:
+    bullets = [
+        f"Subject: {company_name}",
+        f"Usage observed: {files_processed} files, {links_processed} links, about {file_size_gib:,.2f} GiB",
+    ]
+    if license_ids != "unknown":
+        bullets.append(f"License IDs observed in usage data: {license_ids}")
+    personnel_signal = _licensed_personnel_signal(crm_context=crm_context, solo_context=solo_context)
+    if personnel_signal.get("value"):
+        denominator = float(personnel_signal["value"])
+        gib_per_unit = file_size_gib / denominator if denominator else 0
+        bullets.append(
+            f"Entitlement denominator: {personnel_signal['display_value']} from {personnel_signal['source']}; about {gib_per_unit:,.2f} GiB per entitlement unit"
+        )
+    top_findings = [
+        str(item.get("title") or item.get("code"))
+        for item in findings
+        if item.get("code") not in {"missing_solo_activation_timeline", "missing_crm_entitlement", "missing_ip_geolocation"}
+    ]
+    if top_findings:
+        bullets.append("Main review indicators: " + "; ".join(top_findings[:3]))
+    return bullets
+
+
+def _crm_report_section(crm_context: dict[str, Any]) -> dict[str, Any]:
+    if not crm_context.get("configured"):
+        return {
+            "heading": "CRM Relationship, Ownership, Purchase, And Communications",
+            "status": "CRM Aurora relationship and entitlement data: not configured in this deployed report.",
+            "body": [
+                "The report cannot yet summarize relationship history, ownership, purchase records, licensed personnel, notes, communications, or sentiment from CRM."
+            ],
+            "bullets": [
+                "Needed for relationship details: account rows and linked contacts/sites.",
+                "Needed for purchase/entitlement: active LinkTek license rows, quote/order/SRF records, licensed personnel, and organization definition.",
+                "Needed for communications sentiment: CRM notes, emails, calls, and Sales Routing Form narrative fields.",
+            ],
+        }
+    if crm_context.get("error"):
+        return {
+            "heading": "CRM Relationship, Ownership, Purchase, And Communications",
+            "status": f"CRM Aurora relationship and entitlement data: lookup failed ({crm_context['error']}).",
+            "bullets": [f"Lookup error: {crm_context['error']}"],
+        }
+    account_rows = ((crm_context.get("account_lookup") or {}).get("rows") or [])
+    license_rows = ((crm_context.get("license_lookup") or {}).get("rows") or [])
+    linked_payload = crm_context.get("linked_records") or {}
+    linked_licenses = linked_payload.get("licenses") or []
+    linked_total = sum(
+        len(records)
+        for license_item in linked_licenses
+        for records in (license_item.get("linked_records") or {}).values()
+    )
+    bullets = [
+        f"CRM account matches: {len(account_rows)}",
+        f"LinkTek license rows returned: {len(license_rows)} ({_crm_license_lookup_scope_label((crm_context.get('license_lookup') or {}).get('lookup_scope'))})",
+        f"Linked CRM records sampled: {linked_total}",
+    ]
+    if account_rows:
+        bullets.extend(_crm_account_bullets(account_rows))
+    if license_rows:
+        bullets.extend(_crm_license_bullets(license_rows))
+    bullets.extend(_crm_linked_record_bullets(linked_licenses))
+    if not account_rows and not license_rows:
+        bullets.append("No CRM account or LinkTek license rows were returned for this subject.")
+    return {
+        "heading": "CRM Relationship, Ownership, Purchase, And Communications",
+        "status": "CRM Aurora relationship and entitlement data: connected.",
+        "body": [
+            "CRM lookups are available through Aurora. Email bodies are not present in this Aurora sync; available communication context comes from notes, calls, meetings, tasks, deals, SRFs, and license-verification records."
+        ],
+        "bullets": bullets,
+    }
+
+
+def _crm_license_lookup_scope_label(scope: Any) -> str:
+    labels = {
+        "active": "active company/name lookup",
+        "active_by_usage_license": "active lookup by AWS usage license ID",
+        "historical": "historical company/name lookup",
+        "historical_by_usage_license": "historical lookup by AWS usage license ID",
+    }
+    return labels.get(str(scope or ""), "lookup scope unknown")
+
+
+def _crm_account_bullets(account_rows: list[dict[str, Any]]) -> list[str]:
+    bullets: list[str] = []
+    for row in account_rows[:3]:
+        record_type = row.get("record_type") or "record"
+        company = row.get("company_name") or row.get("account_name") or row.get("name") or "unknown"
+        account = row.get("account_name")
+        owner = row.get("owner_name")
+        entity = row.get("entity")
+        detail = f"{record_type}: {company}"
+        if account and account != company:
+            detail += f" / site {account}"
+        if owner:
+            detail += f"; owner {owner}"
+        if entity:
+            detail += f"; entity {entity}"
+        bullets.append(detail)
+    return bullets
+
+
+def _crm_license_bullets(license_rows: list[dict[str, Any]]) -> list[str]:
+    bullets: list[str] = []
+    for row in license_rows[:3]:
+        label = row.get("name") or row.get("license_code") or row.get("id") or "license"
+        expiry = row.get("maintenance_expiry_date") or "unknown expiry"
+        product = row.get("product") or "unknown product"
+        company = row.get("company_name") or row.get("company") or "unknown company"
+        entitlement = _entitlement_signal_from_customer_license(row)
+        count_basis = row.get("which_count_to_use")
+        estimated_personnel = row.get("estimated_personnel_count")
+        scope = row.get("organization_description") or row.get("which_count_to_use")
+        active_label = "Active license" if row.get("active_license") is True else "Historical license"
+        detail = f"{active_label} {label}: {company}; product {product}; expires {expiry}"
+        identity_bits = []
+        if row.get("license_code"):
+            identity_bits.append(f"license code {row.get('license_code')}")
+        if row.get("serial_number"):
+            identity_bits.append(f"serial {row.get('serial_number')}")
+        if row.get("gm_serial_number"):
+            identity_bits.append(f"GM serial {row.get('gm_serial_number')}")
+        if row.get("qlm_license_key"):
+            identity_bits.append("QLM key present")
+        if row.get("solo_password_present"):
+            identity_bits.append("SOLO password present")
+        if identity_bits:
+            detail += "; " + "; ".join(identity_bits)
+        if entitlement.get("value"):
+            detail += f"; entitlement denominator {entitlement['display_value']} ({count_basis or 'basis unspecified'})"
+        if estimated_personnel not in (None, ""):
+            detail += f"; estimated personnel {estimated_personnel}"
+        if row.get("employee_or_computer_count") not in (None, ""):
+            detail += f"; employee/computer count {row.get('employee_or_computer_count')}"
+        if row.get("subset_license_count") not in (None, ""):
+            detail += f"; subset license count {row.get('subset_license_count')}"
+        if row.get("entire_legal_entity_personnel_count_3") not in (None, ""):
+            detail += f"; entire legal entity personnel {row.get('entire_legal_entity_personnel_count_3')}"
+        if scope:
+            detail += f"; scope {scope}"
+        if row.get("possible_violation"):
+            detail += f"; CRM possible_violation={row.get('possible_violation')}"
+        bullets.append(detail)
+    return bullets
+
+
+def _crm_linked_record_bullets(linked_licenses: list[dict[str, Any]]) -> list[str]:
+    bullets: list[str] = []
+    for item in linked_licenses[:2]:
+        linked = item.get("linked_records") or {}
+        counts = {name: len(rows) for name, rows in linked.items()}
+        if counts:
+            bullets.append(
+                "Linked records for sampled license: "
+                + ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+            )
+        for lv in (linked.get("license_verifications") or [])[:2]:
+            detail = f"License Verification {lv.get('name') or lv.get('id')}: stage {lv.get('stage') or 'unknown'}"
+            if lv.get("organization_definition"):
+                detail += f"; org definition {lv.get('organization_definition')}"
+            if lv.get("personnel_count") is not None:
+                detail += f"; licensed personnel {lv.get('personnel_count')}"
+            if lv.get("estimated_personnel_count") is not None:
+                detail += f"; estimated personnel {lv.get('estimated_personnel_count')}"
+            if lv.get("current_status"):
+                detail += f"; status {_truncate(str(lv.get('current_status')), 160)}"
+            bullets.append(detail)
+        for srf in (linked.get("sales_routing_forms") or [])[:2]:
+            detail = f"Sales Routing Form {srf.get('name') or srf.get('id')}: owner {srf.get('owner_name') or 'unknown'}"
+            if srf.get("license_violation") is not None:
+                detail += f"; license_violation={srf.get('license_violation')}"
+            if srf.get("unresolved_license_violation") is not None:
+                detail += f"; unresolved_license_violation={srf.get('unresolved_license_violation')}"
+            bullets.append(detail)
+        qli_quantity = _quantity_from_rows(linked.get("quote_line_item_sets") or [])
+        if qli_quantity is not None:
+            bullets.append(f"Quote line items: entitlement quantity signal {_format_int(qli_quantity)}")
+    return bullets
+
+
+def _solo_report_section(solo_context: dict[str, Any]) -> dict[str, Any]:
+    metrics = solo_context.get("metrics") or {}
+    if not solo_context.get("configured") or not metrics:
+        status = "SOLO activation/export summary: no matching curated summary was found for this subject."
+        if solo_context.get("error"):
+            status = f"SOLO activation/export summary: lookup failed ({solo_context['error']})."
+        return {
+            "heading": "SOLO Activation Evidence",
+            "status": status,
+            "body": [
+                "The report cannot yet compare first activation date, activation IP locations, license status, deactivation dates, or first activation-to-first usage delay in the deployed runtime."
+            ],
+            "bullets": [
+                "Needed: curated SOLO activation and Export Licenses summaries in S3, keyed by License ID and Customer ID.",
+                "Needed: activation IP geolocation cache for city, state, and country comparison.",
+            ],
+        }
+    bullets = [
+        f"Activation rows: {_format_int(metrics.get('activations'))}",
+        f"Successful activations: {_format_int(metrics.get('successful_activations'))}",
+        f"Rejected activations: {_format_int(metrics.get('rejected_activations'))}",
+        f"Unique activation IPs: {_format_int(metrics.get('unique_ips'))}",
+        f"Unique installation IDs: {_format_int(metrics.get('unique_installations'))}",
+        f"Unique computer IDs: {_format_int(metrics.get('unique_computers'))}",
+        f"Deactivations: {_format_int(metrics.get('deactivations'))}",
+        f"Unique SOLO licenses: {_format_int(metrics.get('unique_licenses'))}",
+    ]
+    if metrics.get("q_ordered_total"):
+        bullets.append(
+            f"SOLO Export Licenses QOrdered total: {_format_int(metrics.get('q_ordered_total'))} across {_format_int(metrics.get('q_ordered_license_count'))} license row(s)"
+        )
+    return {
+        "heading": "SOLO Activation Evidence",
+        "status": "SOLO activation/export summary: connected from curated summary data.",
+        "bullets": bullets,
+    }
+
+
+def _ip_geolocation_report_section(ip_context: dict[str, Any], public_ips: list[Any]) -> dict[str, Any]:
+    records = ip_context.get("records") or {}
+    public_ip_values = [str(value) for value in (ip_context.get("public_ips") or public_ips) if str(value).strip()]
+    activation_ip_values = [str(value) for value in ip_context.get("activation_ips") or [] if str(value).strip()]
+    requested_ips = sorted(set(public_ip_values + activation_ip_values))
+    expected_count = len(requested_ips)
+    if expected_count == 0:
+        return {
+            "heading": "IP Geolocation Evidence",
+            "status": "No public IP addresses were present in the AWS usage summary for this subject.",
+            "body": [
+                "There are no AWS ProcessInfo public IPs or SOLO activation IPs to geolocate for this report."
+            ],
+            "bullets": [],
+        }
+    if not records:
+        status = "IP geolocation cache: not connected yet."
+        if ip_context.get("error"):
+            status = f"IP geolocation cache: lookup failed ({ip_context['error']})."
+        return {
+            "heading": "IP Geolocation Evidence",
+            "status": status,
+            "body": [
+                "Public IP spread cannot yet be compared to allowed organization geography."
+            ],
+            "bullets": [
+                "Needed: GeoLite2 backfill cache keyed by public IP address.",
+                "GeoLite2 is approximate; reports should use city/region/country plus accuracy radius, not street-level conclusions.",
+            ],
+        }
+    locations = []
+    for ip_address, record in sorted(records.items()):
+        if not isinstance(record, dict):
+            continue
+        city = record.get("city") or "unknown city"
+        region = record.get("region") or ""
+        country = record.get("country") or "unknown country"
+        radius = record.get("accuracy_radius_km")
+        radius_text = f", radius {radius} km" if radius not in ("", None) else ""
+        region_text = f", {region}" if region else ""
+        sources = []
+        if ip_address in set(public_ip_values):
+            sources.append("AWS usage")
+        if ip_address in set(activation_ip_values):
+            sources.append("SOLO activation")
+        source_text = f" ({', '.join(sources)})" if sources else ""
+        locations.append(f"{ip_address}{source_text}: {city}{region_text}, {country}{radius_text}")
+    return {
+        "heading": "IP Geolocation Evidence",
+        "status": f"IP geolocation cache: connected ({len(records)} of {expected_count} public IPs found in cache).",
+        "body": [
+            "Locations are GeoLite2 city-level approximations. Treat them as investigative signals, not exact office addresses."
+        ],
+        "bullets": locations[:10] or ["No cache records were available for the listed public IPs."],
+    }
+
+
+def _missing_data_items(
+    *,
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+    ip_geolocation_context: dict[str, Any],
+    public_ip_count: int,
+) -> list[str]:
+    items: list[str] = []
+    if not solo_context.get("configured"):
+        items.append("No matching SOLO activation/export summary was found for this subject.")
+    if not crm_context.get("configured"):
+        items.append("CRM relationship, purchase, entitlement, organization definition, notes, and communications are missing from the deployed report.")
+    activation_ip_count = len(ip_geolocation_context.get("activation_ips") or [])
+    if (public_ip_count > 0 or activation_ip_count > 0) and not (ip_geolocation_context.get("records") or {}):
+        items.append("IP geolocation is missing, so public IP spread cannot yet be compared to allowed organization geography.")
+    if not _licensed_personnel_signal(crm_context=crm_context, solo_context=solo_context).get("value"):
+        items.append("Entitlement count is missing, so the 100 GiB per entitlement-unit review threshold cannot yet be calculated.")
+    return items
+
+
+def _has_crm_entitlement_context(crm_context: dict[str, Any]) -> bool:
+    if not crm_context.get("configured") or crm_context.get("error"):
+        return False
+    license_rows = ((crm_context.get("license_lookup") or {}).get("rows") or [])
+    if any(row.get("organization_description") or row.get("which_count_to_use") for row in license_rows):
+        return True
+    linked_licenses = ((crm_context.get("linked_records") or {}).get("licenses") or [])
+    for item in linked_licenses:
+        linked = item.get("linked_records") or {}
+        for lv in linked.get("license_verifications") or []:
+            if lv.get("organization_definition") or lv.get("personnel_count") is not None:
+                return True
+    return False
+
+
+def _licensed_personnel_signal(
+    *,
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+) -> dict[str, Any]:
+    license_rows = ((crm_context.get("license_lookup") or {}).get("rows") or [])
+    for row in license_rows:
+        signal = _entitlement_signal_from_customer_license(row)
+        if signal.get("value"):
+            return signal
+
+    for item in ((crm_context.get("linked_records") or {}).get("licenses") or []):
+        linked = item.get("linked_records") or {}
+        for row in linked.get("license_verifications") or []:
+            value = _positive_number(row.get("personnel_count"))
+            if value is not None:
+                return _personnel_signal(value, "CRM License Verification personnel_count")
+
+    for item in ((crm_context.get("linked_records") or {}).get("licenses") or []):
+        linked = item.get("linked_records") or {}
+        value = _quantity_from_rows(linked.get("quote_line_item_sets") or [])
+        if value is not None:
+            return _personnel_signal(value, "CRM quote line item quantity")
+
+    metrics = solo_context.get("metrics") or {}
+    if metrics.get("solo_entitlement_count"):
+        return _personnel_signal(float(metrics["solo_entitlement_count"]), metrics.get("solo_entitlement_source") or "SOLO Export Licenses QOrdered total")
+    for key in ("licensed_personnel_count", "personnel_licensed", "q_ordered", "QOrdered", "q_ordered_total"):
+        value = _positive_number(metrics.get(key))
+        if value is not None:
+            return _personnel_signal(value, f"SOLO export {key}")
+
+    return {"value": None, "display_value": "unknown", "source": "not found"}
+
+
+def _entitlement_signal_from_customer_license(row: dict[str, Any]) -> dict[str, Any]:
+    basis = str(row.get("which_count_to_use") or "").strip()
+    basis_lower = basis.lower()
+    if "employee" in basis_lower or "computer" in basis_lower or "personnel" in basis_lower or "user" in basis_lower:
+        value = _positive_number(row.get("employee_or_computer_count"))
+        if value is not None:
+            return _personnel_signal(value, f"CRM Customer License employee_or_computer_count ({basis})")
+    if "subset" in basis_lower:
+        value = _positive_number(row.get("subset_license_count"))
+        if value is not None:
+            return _personnel_signal(value, f"CRM Customer License subset_license_count ({basis})")
+    if "entire" in basis_lower or "legal entity" in basis_lower:
+        value = _positive_number(row.get("entire_legal_entity_personnel_count_3"))
+        if value is not None:
+            return _personnel_signal(value, f"CRM Customer License entire_legal_entity_personnel_count_3 ({basis})")
+    if "site" in basis_lower:
+        for key in ("site_count", "single_quantity"):
+            value = _positive_number(row.get(key))
+            if value is not None:
+                return _personnel_signal(value, f"CRM Customer License {key} ({basis})")
+    if "single" in basis_lower:
+        value = _positive_number(row.get("single_quantity"))
+        if value is not None:
+            return _personnel_signal(value, f"CRM Customer License single_quantity ({basis})")
+    if "link" in basis_lower:
+        value = _positive_number(row.get("link_limit") or row.get("links"))
+        if value is not None:
+            return _personnel_signal(value, f"CRM Customer License link_limit ({basis})")
+
+    fallback_order = (
+        ("employee_or_computer_count", "CRM Customer License employee_or_computer_count"),
+        ("subset_license_count", "CRM Customer License subset_license_count"),
+        ("entire_legal_entity_personnel_count_3", "CRM Customer License entire_legal_entity_personnel_count_3"),
+        ("site_count", "CRM Customer License site_count"),
+        ("single_quantity", "CRM Customer License single_quantity"),
+        ("total_seat_count", "CRM Customer License total_seat_count"),
+    )
+    for key, source in fallback_order:
+        value = _positive_number(row.get(key))
+        if value is not None:
+            suffix = f" ({basis})" if basis else ""
+            return _personnel_signal(value, source + suffix)
+    return {"value": None, "display_value": "unknown", "source": "not found"}
+
+
+def _personnel_signal(value: float, source: str) -> dict[str, Any]:
+    display_value = _format_int(value) if float(value).is_integer() else f"{value:,.2f}"
+    return {"value": value, "display_value": display_value, "source": source}
+
+
+def _positive_number(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number
+
+
+def _quantity_from_rows(rows: list[dict[str, Any]]) -> float | None:
+    total = 0.0
+    found = False
+    quantity_keys = (
+        "personnel_count",
+        "licensed_personnel_count",
+        "license_count",
+        "quantity",
+        "Quantity",
+        "qty",
+        "Qty",
+        "QTY",
+        "number_of_users",
+        "user_count",
+        "seat_count",
+        "total_seat_count",
+        "employee_or_computer_count",
+    )
+    for row in rows:
+        for key in quantity_keys:
+            value = _positive_number(row.get(key))
+            if value is None:
+                continue
+            total += value
+            found = True
+            break
+    if not found:
+        return None
+    return total
+
+
+def _sample_list(values: list[Any], *, limit: int = 8) -> str:
+    cleaned = [str(value) for value in values if str(value).strip()]
+    if not cleaned:
+        return "none found"
+    suffix = "" if len(cleaned) <= limit else f" plus {len(cleaned) - limit} more"
+    return ", ".join(cleaned[:limit]) + suffix
+
+
+def _sample_record_labels(rows: list[dict[str, Any]], *, limit: int = 3) -> str:
+    labels: list[str] = []
+    for row in rows[:limit]:
+        for key in ("company_name", "Company Name", "account_name", "name", "license_code", "id"):
+            value = row.get(key)
+            if value:
+                labels.append(str(value))
+                break
+        else:
+            labels.append(str(row)[:120])
+    suffix = "" if len(rows) <= limit else f" plus {len(rows) - limit} more"
+    return "; ".join(labels) + suffix
+
+
+def _first_nonempty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _truncate(value: str, limit: int) -> str:
+    value = " ".join(value.split())
+    return value if len(value) <= limit else value[: limit - 3].rstrip() + "..."
+
+
+def _selection_index(text: str) -> int | None:
+    lowered = text.lower().strip()
+    number_match = re.search(r"\b([1-5])\b", lowered)
+    if number_match:
+        return int(number_match.group(1)) - 1
+    word_indexes = {
+        "first": 0,
+        "second": 1,
+        "third": 2,
+        "fourth": 3,
+        "fifth": 4,
+    }
+    for word, index in word_indexes.items():
+        if re.search(rf"\b{word}\b", lowered):
+            return index
+    return None
+
+
+def _format_int(value: Any) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "0"
 
 
 def _finding_codes(last_job: dict[str, Any] | None) -> list[str]:

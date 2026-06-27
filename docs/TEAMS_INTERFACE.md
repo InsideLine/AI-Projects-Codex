@@ -27,11 +27,13 @@ python -m uvicorn license_agent.api:app --reload
 
 ## Production Integration
 
-Use Microsoft Bot Framework or an Azure Bot registered for Teams. The bot should forward user messages to the agent API, then format the response as:
+Use Microsoft Bot Framework or an Azure Bot registered for Teams. Teams posts activities to:
 
-- Short summary in the Teams thread.
-- Link to full report.
-- Buttons for "finding accepted", "finding wrong", and "needs more evidence".
+```text
+<BotEndpointBaseUrl>/teams/message
+```
+
+The deployed API validates Bot Framework bearer tokens before processing Teams activities. Non-Bot-Framework smoke-test payloads must use the `x-license-agent-secret` header.
 
 ## Recommended Runtime Pattern
 
@@ -40,9 +42,10 @@ Pattern this after the existing Axiom chat-bot shape rather than a fully autonom
 1. Teams sends a message to a bot endpoint.
 2. The bot calls a small API service in AWS.
 3. The API classifies the intent, records chat memory, and queues a report job.
-4. A worker loads compiled warehouse data, runs deterministic checks, and stores the result.
-5. An LLM can summarize the finished report or explain findings, but the findings themselves stay evidence-based.
-6. Reviewer feedback is stored as structured labels so the system learns which signals are useful.
+4. The report builder loads compiled S3 summaries plus Aurora CRM context, runs deterministic checks, and stores the result.
+5. The Teams reply includes a copy-friendly Markdown report and, when S3 reports are configured, a Word document link.
+6. An LLM can later summarize, ask clarification questions, or explain findings, but the findings themselves stay evidence-based.
+7. Reviewer feedback is stored as structured labels so the system learns which signals are useful.
 
 This does not need to be "agentic" in the Bedrock Agents sense for v1. A Bedrock Converse style assistant with explicit tool calls, memory, and queued jobs is the better fit here.
 
@@ -53,11 +56,12 @@ The local scaffold now supports:
 - job status polling
 - structured feedback capture
 - constrained data questions against the latest SOLO analysis report
-- read-only CRM company lookup through Aurora once table mapping is configured
+- read-only CRM company lookup through Aurora
 - read-only active LinkTek license lookup through Aurora
 - read-only lookup of CRM records linked to those active LinkTek licenses
+- investigation-report fallback to historical LinkTek Customer License rows when AWS usage references an expired license
 
-Production work still must add authentication, tenant validation, Teams/Bot Framework plumbing, and the live Athena or Aurora-backed report loader.
+Production work still must add richer adaptive-card actions for feedback. Authentication, Teams/Bot Framework plumbing, Aurora CRM lookup, S3 usage summaries, and Word report artifacts are already implemented.
 
 ## Data Questions
 
@@ -73,7 +77,7 @@ Show records linked to license id LTK-1234.
 Show linked records for active LinkTek licenses for Hudson Housing Capital LLC.
 ```
 
-CRM lookup is intentionally constrained to allowlisted Aurora query templates. The active-license path filters to LinkTek licenses that are marked active and have an expiry date after today, then fetches linked Sales Routing Form, License Verification, and quote line item set records through configured relationship columns. Configure:
+CRM lookup is intentionally constrained to allowlisted Aurora query templates. Ad hoc active-license questions filter to LinkTek licenses that are marked active and have an expiry date after today. Investigation reports first try active rows, then fall back to historical LinkTek Customer License rows by observed AWS usage license ID so older ProcessInfo evidence can still be reviewed. Configure:
 
 ```text
 AURORA_DATABASE_URL=

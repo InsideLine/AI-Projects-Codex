@@ -67,6 +67,7 @@ class BotFrameworkTests(TestCase):
         self.assertEqual(reply["from"]["id"], "bot-id")
         self.assertEqual(reply["recipient"]["id"], "user-id")
         self.assertEqual(reply["replyToId"], "activity-id")
+        self.assertEqual(reply["textFormat"], "markdown")
         self.assertEqual(reply["text"], "Hello")
 
     def test_handler_routes_message_to_teams_service_and_replies(self) -> None:

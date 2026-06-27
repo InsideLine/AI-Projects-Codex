@@ -2,69 +2,54 @@
 
 ## Data Flow
 
-1. Source extract jobs pull or receive files from SOLO, AWS customer usage data, and Zoho CRM.
-2. Raw files are written to S3 with immutable paths and checksums.
-3. AWS Glue catalogs the raw and refined datasets.
-4. Athena queries the raw and refined datasets for scheduled analysis and ad hoc investigation.
-5. Normalization jobs can later load a curated subset into Aurora if lower-latency relational access becomes necessary.
-6. IP addresses from activations and usage are enriched through a geolocation provider.
-7. The analysis engine reads compiled datasets and produces report rows plus findings.
-8. Teams users request reports and submit feedback.
-9. Feedback is stored as labels for review, test cases, and rule improvement.
+1. Source extract jobs pull or receive AWS usage, SOLO licensing, CRM, and geolocation data.
+2. Raw extracts are written to S3 with stable paths and checksums.
+3. Curated builders create compact S3 summaries for report-time lookup:
+   - AWS ProcessInfo company usage summary.
+   - SOLO activation/export company summary indexed by company and license ID.
+   - GeoLite2 IP geolocation cache keyed by public IP address.
+4. CRM relationship and entitlement context is queried read-only from the Aurora Zoho CRM sync through the RDS Data API.
+5. Teams users request reports by company or license.
+6. The report builder combines usage, SOLO, CRM, and IP context into findings, a Teams summary, and a Word document artifact.
+7. Reviewer feedback is stored as labels for rule improvement and future training.
 
 ## Runtime Components
 
-- Extract workers: scheduled jobs for AWS, later SOLO, Zoho, and geolocation enrichment.
-- S3 landing zone: raw source-of-truth storage for incoming batches and exports.
-- AWS Glue Data Catalog: table metadata and crawler-managed discovery.
-- Athena: primary query surface for non-urgent analytical investigation work.
-- Aurora PostgreSQL: optional later-stage store for curated hot data if query latency becomes a product requirement.
-- Agent API: service that accepts Teams requests and returns report summaries.
-- Report writer: produces report records and optionally PDF/HTML output.
-- Feedback processor: turns analyst review into labels and proposed rule changes.
+- Agent API: FastAPI running on Lambda through Mangum.
+- Teams adapter: validates Bot Framework JWTs and replies through the Bot Connector API.
+- Chat/job store: DynamoDB table for user messages, queued jobs, completed reports, and feedback.
+- Usage summary reader: loads `curated/aws_usage/company_usage_summary.json` from S3.
+- SOLO summary reader: loads `curated/solo_softwarekey/company_activation_summary.json` from S3.
+- IP cache reader: loads `curated/ip_geolocation/ip_geolocation_cache.json` from S3.
+- Aurora CRM reader: allowlisted RDS Data API templates for companies, Customer Licenses, SRFs, License Verification records, deals, notes, QLM keys, and quote line items.
+- Report writer: writes `.docx` reports to encrypted S3 and returns presigned links.
+- Optional sync worker: ECS/Fargate scheduled task for weekly cross-account DynamoDB pulls.
 
-## AWS Deployment Shape
+## Current Storage Decision
 
-- Bot API: AWS Lambda running the FastAPI app through Mangum.
-- Bot endpoint: Lambda Function URL, protected by `x-license-agent-secret` until Bot Framework JWT validation is wired.
-- Chat/job state: DynamoDB table keyed by `pk` and `sk`.
-- Raw data: encrypted S3 landing bucket.
-- Reports: encrypted S3 reports bucket.
-- Athena output: encrypted S3 query-results bucket.
-- Catalog: Glue database and crawler over raw S3 data.
-- AWS usage sync: weekly EventBridge schedule running an ECS/Fargate task.
-- SOLO sync: explicitly deferred; configuration remains reserved for a future scheduled report export.
+The selected data platform is `S3 + Glue Data Catalog + Athena` for high-volume usage and licensing datasets, with Aurora used only where it already exists for CRM.
 
-## Current Decision
-
-The selected default architecture is `S3 + Glue Data Catalog + Athena`.
-
-Aurora is intentionally deferred until we have evidence that:
-
-- Athena query latency is slowing investigator workflows, or
-- the report experience needs indexed relational joins often enough to justify a continuously managed database
+This keeps recurring cost low and avoids moving large ProcessInfo history into a transactional database before the query pattern proves it needs that. If report latency or joins become painful, add Athena views first; add a curated Aurora subset only if Athena is not enough.
 
 ## Report Generation Contract
 
 For a license ID or company, the report should include:
 
-- Subject, generation time, data freshness, and source extracts used.
-- Activation timeline.
-- Usage timeline.
-- IP locations with provider, lookup timestamp, and accuracy radius.
-- Location comparison against organization definition.
-- Activation to usage pairings.
-- Data processed totals.
-- GB per licensed personnel.
-- Illogical or inconsistent fields.
-- Evaluation and evidence-backed findings.
-- Human review status and feedback history.
+- Executive summary and evaluation.
+- AWS usage totals, date range, machine names, MAC addresses, users, and public IPs.
+- SOLO activation/export metrics, including activation counts, rejected activations, deactivations, installation IDs, and license IDs.
+- IP geolocation for AWS public IPs and SOLO activation IPs, with city/region/country and accuracy radius.
+- CRM relationship, ownership, purchase, entitlement, organization definition, notes, SRFs, License Verification records, deals, and quote-line context when present.
+- EULA threshold calculation using the best available entitlement denominator.
+- Findings and recommended human review steps.
+- Word document output for copying, sharing, and archival use.
 
 ## Security Notes
 
-- Treat IP addresses, usernames, MAC addresses, tenant IDs, and database names as sensitive investigation data.
-- Use least-privilege IAM roles for cross-account AWS extraction.
-- Store source credentials in AWS Secrets Manager.
-- Encrypt S3 buckets, Athena query-results buckets, Glue-connected assets, and Aurora if Aurora is added later.
-- Retain raw extracts according to legal and compliance requirements.
-- Keep report access limited to authorized license verification users.
+- Treat IP addresses, usernames, MAC addresses, tenant IDs, database names, notes, and report artifacts as sensitive investigation data.
+- Store credentials in AWS Secrets Manager.
+- Use least-privilege IAM roles for cross-account AWS extraction and Aurora read access.
+- Keep the Lambda Function URL internet reachable for Teams, but validate Bot Framework activities with JWTs.
+- Keep non-Bot Framework test endpoints protected by `x-license-agent-secret`.
+- Encrypt raw data, report artifacts, and Athena results in S3.
+- Presigned report links are convenient but time-limited; shorten expiry or move to authenticated downloads if reports need tighter handling.

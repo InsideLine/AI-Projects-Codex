@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import ipaddress
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,6 +28,13 @@ class SoloCompanyMetric:
     unique_computers: int
     deactivations: int
     unique_licenses: int
+    q_ordered_total: int = 0
+    q_ordered_max: int = 0
+    q_ordered_license_count: int = 0
+    solo_entitlement_count: int | None = None
+    solo_entitlement_source: str = ""
+    license_ids: tuple[str, ...] = ()
+    activation_ips: tuple[str, ...] = ()
 
 
 def read_csv_rows(path: str | Path) -> list[dict[str, str]]:
@@ -105,6 +113,11 @@ def build_company_metrics(
         successful = sum(1 for row in rows if (row.get("Status") or "").strip() == "Successful")
         rejected = sum(1 for row in rows if (row.get("Status") or "").strip() == "Rejected")
         unique_ips = {row.get("IPAddress", "").strip() for row in rows if row.get("IPAddress")}
+        public_activation_ips = {
+            ip_address
+            for ip_address in unique_ips
+            if _public_ip_or_none(ip_address) is not None
+        }
         unique_installations = {row.get("InstallationID", "").strip() for row in rows if row.get("InstallationID")}
         unique_computers = {row.get("ComputerID", "").strip() for row in rows if row.get("ComputerID")}
         deactivations = sum(1 for row in rows if (row.get("DeactivatedDate") or "").strip())
@@ -122,6 +135,8 @@ def build_company_metrics(
             unique_computers=len(unique_computers),
             deactivations=deactivations,
             unique_licenses=len(unique_licenses),
+            license_ids=tuple(sorted(unique_licenses)),
+            activation_ips=tuple(sorted(public_activation_ips)),
         )
     return metrics
 
@@ -198,6 +213,16 @@ def _parse_zoho_datetime(value: str | None) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _public_ip_or_none(value: str) -> str | None:
+    try:
+        parsed = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+    if parsed.is_private or parsed.is_loopback or parsed.is_link_local or parsed.is_multicast or parsed.is_reserved:
+        return None
+    return str(parsed)
 
 
 def _share(items: list[SoloCompanyMetric], predicate) -> float:

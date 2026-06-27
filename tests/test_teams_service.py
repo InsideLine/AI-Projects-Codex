@@ -4,7 +4,57 @@ from unittest import TestCase
 
 from license_agent.data_query import DataQueryResult
 from license_agent.settings import LicenseAgentSettings
-from license_agent.teams_service import TeamsChatService, parse_intent
+from license_agent.teams_service import TeamsChatService, build_usage_report_result, parse_intent
+
+
+class FakeUsageClient:
+    def __init__(self, match=None, candidates=None) -> None:
+        self.match = match
+        self.candidates = candidates or []
+
+    def find_company(self, company_name: str) -> dict:
+        return {
+            "configured": True,
+            "error": "",
+            "match": self.match,
+            "candidates": self.candidates,
+            "summary_meta": {"company_count": 1},
+        }
+
+    def find_license(self, license_id: str) -> dict:
+        return {"configured": True, "error": "", "match": self.match, "summary_meta": {"company_count": 1}}
+
+
+class FakeReportQueryService:
+    def __init__(self, match=None, ip_records=None) -> None:
+        self.usage_client = FakeUsageClient(match)
+        self.ip_geolocation_client = FakeIpGeolocationClient(ip_records or {})
+
+    def runtime_status(self):
+        return {"aws_usage_summary": {"configured": bool(self.usage_client.match)}}
+
+    def answer(self, text: str) -> DataQueryResult:
+        return DataQueryResult(kind="fake", message=text, evidence={})
+
+
+class FakeIpGeolocationClient:
+    def __init__(self, records) -> None:
+        self.records = records
+
+    def status(self):
+        return {"configured": bool(self.records)}
+
+    def lookup_many(self, ip_addresses):
+        return {
+            "configured": bool(self.records),
+            "error": "",
+            "records": {
+                ip_address: self.records[ip_address]
+                for ip_address in ip_addresses
+                if ip_address in self.records
+            },
+            "meta": {"provider": "maxmind_geolite2_city"},
+        }
 
 
 class TeamsIntentTests(TestCase):
@@ -26,6 +76,15 @@ class TeamsIntentTests(TestCase):
         self.assertEqual(intent.kind, "report_request")
         self.assertEqual(intent.subject_type, "company")
         self.assertEqual(intent.subject_value, "Hudson Housing Capital LLC")
+
+    def test_parses_full_report_request_without_trailing_instructions(self) -> None:
+        intent = parse_intent(
+            "Can you give me a full report on Mediterranean Shipping Company Pty Ltd. "
+            "I am looking for possible evidence that they might be violation the LinkTek EULA (license violation)."
+        )
+        self.assertEqual(intent.kind, "report_request")
+        self.assertEqual(intent.subject_type, "company")
+        self.assertEqual(intent.subject_value, "Mediterranean Shipping Company Pty Ltd")
 
     def test_parses_explanation_request(self) -> None:
         intent = parse_intent("Why did you flag this as suspicious?")
@@ -158,3 +217,328 @@ class TeamsChatServiceTests(TestCase):
             request = service.handle_message("company Example Corp", "analyst@example.com")
             response = service.handle_message(f"status {request['job_id']}", "analyst@example.com")
             self.assertIn("not enough connected data", response["message"])
+
+    def test_report_job_uses_connected_usage_summary(self) -> None:
+        usage_summary = {
+            "company_name": "Mediterranean Shipping Company Pty Ltd",
+            "license_ids": ["66304944"],
+            "files_processed": 66827,
+            "links_processed": 286515,
+            "file_size_gib": 17.89,
+            "file_size_in_bytes": 19214129332,
+            "run_count": 59,
+            "machine_count": 2,
+            "machine_names": ["ZA031DURL1010", "ZA031EW1DAPP010"],
+            "mac_count": 3,
+            "mac_addresses": ["00090FAA0001", "0022488921F8", "088E90D80D5B"],
+            "public_ip_count": 6,
+            "public_ips": ["102.182.5.223", "169.1.52.132"],
+            "first_start_time": "2025-07-09 10:27:51",
+            "last_end_time": "2026-01-17 03:28:12",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = LicenseAgentSettings(
+                app_db_path=str(Path(temp_dir) / "app.sqlite3"),
+                report_output_root=str(Path(temp_dir) / "reports"),
+            )
+            service = TeamsChatService(
+                settings,
+                data_query_service=FakeReportQueryService(usage_summary),
+                run_async=False,
+            )
+            request = service.handle_message(
+                "Can you give me a full report on Mediterranean Shipping Company Pty Ltd. "
+                "I am looking for possible evidence that they might be violation the LinkTek EULA.",
+                "analyst@example.com",
+            )
+            self.assertIn("**License Violation Review: Mediterranean Shipping Company Pty Ltd**", request["message"])
+            self.assertIn("66,827", request["message"])
+            self.assertNotIn("Ask for `status", request["message"])
+            response = service.handle_message(f"status {request['job_id']}", "analyst@example.com")
+
+        self.assertIn("**License Violation Review: Mediterranean Shipping Company Pty Ltd**", response["message"])
+        self.assertIn("Files processed: 66,827", response["message"])
+        self.assertIn("License usage appears on multiple MAC addresses", response["message"])
+        self.assertTrue(response["job"]["result"]["data_connected"])
+
+    def test_report_includes_ip_geolocation_cache_when_connected(self) -> None:
+        usage_summary = {
+            "company_name": "Example Corp",
+            "license_ids": ["66000000"],
+            "files_processed": 1,
+            "links_processed": 2,
+            "file_size_gib": 0.1,
+            "file_size_in_bytes": 100,
+            "run_count": 1,
+            "machine_count": 1,
+            "mac_count": 1,
+            "public_ip_count": 1,
+            "public_ips": ["1.1.1.1"],
+        }
+        ip_records = {
+            "1.1.1.1": {
+                "city": "Sydney",
+                "region": "New South Wales",
+                "country": "Australia",
+                "accuracy_radius_km": 20,
+            }
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = LicenseAgentSettings(
+                app_db_path=str(Path(temp_dir) / "app.sqlite3"),
+                report_output_root=str(Path(temp_dir) / "reports"),
+            )
+            service = TeamsChatService(
+                settings,
+                data_query_service=FakeReportQueryService(usage_summary, ip_records=ip_records),
+                run_async=False,
+            )
+            response = service.handle_message("company Example Corp", "analyst@example.com")
+
+        self.assertIn("**IP Geolocation Evidence**", response["message"])
+        self.assertIn("1.1.1.1 (AWS usage): Sydney, New South Wales, Australia, radius 20 km", response["message"])
+        self.assertNotIn("IP geolocation is missing", response["message"])
+
+    def test_ambiguous_company_search_asks_for_clarification_then_uses_selection(self) -> None:
+        first = {
+            "company_name": "Mediterranean Shipping Company Pty Ltd",
+            "company_key": "mediterranean shipping company pty ltd",
+            "license_ids": ["66304944"],
+            "score": 0.79,
+            "files_processed": 66827,
+            "links_processed": 286515,
+            "file_size_gib": 17.89,
+            "file_size_in_bytes": 19214129332,
+            "run_count": 59,
+            "machine_count": 2,
+            "mac_count": 3,
+            "public_ip_count": 6,
+        }
+        second = {
+            "company_name": "MSC Mediterranean Shipping Company SA",
+            "company_key": "msc mediterranean shipping company sa",
+            "license_ids": ["66000000"],
+            "score": 0.76,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = LicenseAgentSettings(
+                app_db_path=str(Path(temp_dir) / "app.sqlite3"),
+                report_output_root=str(Path(temp_dir) / "reports"),
+            )
+            service = TeamsChatService(
+                settings,
+                data_query_service=FakeReportQueryService(match=None),
+                run_async=False,
+            )
+            service.data_query_service.usage_client = FakeUsageClient(match=None, candidates=[first, second])
+            response = service.handle_message("Report on Mediterranean Shipping", "analyst@example.com")
+
+            self.assertEqual(response["type"], "company_clarification")
+            self.assertIn("Which one should I use", response["message"])
+            self.assertIn("1. Mediterranean Shipping Company Pty Ltd", response["message"])
+
+            service.data_query_service.usage_client = FakeUsageClient(match=first)
+            selected = service.handle_message("use 1", "analyst@example.com")
+
+        self.assertEqual(selected["type"], "report_requested")
+        self.assertIn("**License Violation Review: Mediterranean Shipping Company Pty Ltd**", selected["message"])
+
+    def test_report_uses_crm_licensed_personnel_for_eula_threshold(self) -> None:
+        summary = {
+            "company_name": "Mediterranean Shipping Company Pty Ltd",
+            "license_ids": ["66304944"],
+            "files_processed": 66827,
+            "links_processed": 286515,
+            "file_size_gib": 17.89,
+            "file_size_in_bytes": 19214129332,
+            "run_count": 59,
+            "machine_count": 1,
+            "mac_count": 1,
+            "public_ip_count": 0,
+        }
+        crm_context = {
+            "configured": True,
+            "error": "",
+            "license_lookup": {
+                "rows": [
+                    {
+                        "name": "Gold -- LFA",
+                        "company_name": "Mediterranean Shipping Company Pty Ltd",
+                        "product": "LinkTek",
+                        "maintenance_expiry_date": "2026-08-28",
+                        "employee_or_computer_count": 10,
+                        "estimated_personnel_count": 200000,
+                        "which_count_to_use": "Employee",
+                        "organization_description": "South Africa Finance Division Only",
+                    }
+                ]
+            },
+            "linked_records": {
+                "licenses": [
+                    {
+                        "linked_records": {
+                            "license_verifications": [
+                                {
+                                    "name": "LV-1",
+                                    "stage": "Data Gathering",
+                                    "personnel_count": 10,
+                                    "estimated_personnel_count": 200000,
+                                    "organization_definition": "South Africa Finance Division Only",
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        }
+
+        result = build_usage_report_result(
+            "company",
+            "Mediterranean Shipping Company Pty Ltd",
+            summary,
+            {"source_rows": 59, "company_count": 1},
+            crm_context=crm_context,
+            solo_context={"configured": True, "metrics": {"activations": 1}},
+            ip_geolocation_context={"records": {}},
+        )
+
+        report_text = result["report_text"]
+        self.assertIn("Entitlement denominator: 10 from CRM Customer License employee_or_computer_count (Employee)", report_text)
+        self.assertIn("about 1.79 GiB per entitlement unit", report_text)
+        self.assertIn("entitlement denominator 10 (Employee)", report_text)
+        self.assertIn("estimated personnel 200000", report_text)
+        self.assertNotIn("Licensed personnel count is missing", report_text)
+
+    def test_report_flags_usage_over_threshold_when_crm_personnel_is_available(self) -> None:
+        summary = {
+            "company_name": "Example Corp",
+            "license_ids": ["66000000"],
+            "files_processed": 10,
+            "links_processed": 20,
+            "file_size_gib": 600,
+            "file_size_in_bytes": 644245094400,
+            "run_count": 2,
+            "machine_count": 1,
+            "mac_count": 1,
+            "public_ip_count": 0,
+        }
+        crm_context = {
+            "configured": True,
+            "error": "",
+            "license_lookup": {"rows": [{"employee_or_computer_count": 5, "which_count_to_use": "Employee"}]},
+            "linked_records": {"licenses": []},
+        }
+
+        result = build_usage_report_result(
+            "company",
+            "Example Corp",
+            summary,
+            {"source_rows": 2, "company_count": 1},
+            crm_context=crm_context,
+            solo_context={"configured": True, "metrics": {"activations": 1}},
+            ip_geolocation_context={"records": {}},
+        )
+
+        finding_codes = {item["code"] for item in result["findings"]}
+        self.assertIn("usage_over_eula_review_threshold", finding_codes)
+        self.assertEqual(result["evaluation"], "review recommended")
+
+    def test_report_can_use_quote_line_item_quantity_when_license_verification_count_is_missing(self) -> None:
+        summary = {
+            "company_name": "Example Corp",
+            "license_ids": ["66000000"],
+            "files_processed": 10,
+            "links_processed": 20,
+            "file_size_gib": 300,
+            "file_size_in_bytes": 322122547200,
+            "run_count": 2,
+            "machine_count": 1,
+            "mac_count": 1,
+            "public_ip_count": 0,
+        }
+        crm_context = {
+            "configured": True,
+            "error": "",
+            "license_lookup": {"rows": [{"which_count_to_use": "Employee"}]},
+            "linked_records": {
+                "licenses": [
+                    {
+                        "linked_records": {
+                            "license_verifications": [],
+                            "quote_line_item_sets": [{"quantity": 3}],
+                        }
+                    }
+                ]
+            },
+        }
+
+        result = build_usage_report_result(
+            "company",
+            "Example Corp",
+            summary,
+            {"source_rows": 2, "company_count": 1},
+            crm_context=crm_context,
+            solo_context={"configured": True, "metrics": {"activations": 1}},
+            ip_geolocation_context={"records": {}},
+        )
+
+        self.assertIn("Entitlement denominator: 3 from CRM quote line item quantity", result["report_text"])
+        self.assertIn("Quote line items: entitlement quantity signal 3", result["report_text"])
+
+    def test_report_uses_customer_license_subset_and_entity_fields_from_which_count_to_use(self) -> None:
+        summary = {
+            "company_name": "LinkFixer Example",
+            "license_ids": ["70006914"],
+            "files_processed": 10,
+            "links_processed": 20,
+            "file_size_gib": 170,
+            "file_size_in_bytes": 182536110080,
+            "run_count": 2,
+            "machine_count": 1,
+            "mac_count": 1,
+            "public_ip_count": 0,
+        }
+        crm_context = {
+            "configured": True,
+            "error": "",
+            "license_lookup": {
+                "rows": [
+                    {
+                        "name": "LinkFixer",
+                        "license_code": "70006914",
+                        "solo_password_present": True,
+                        "serial_number": "SER-70006914",
+                        "product": "LinkFixer",
+                        "maintenance_expiry_date": "2027-01-01",
+                        "link_limit": 0,
+                        "employee_or_computer_count": 1700,
+                        "which_count_to_use": "Employee",
+                        "site_count": None,
+                        "subset_license_count": 1700,
+                        "subset_price_multiplier_3": 70,
+                        "entire_legal_entity_personnel_count_3": 1700,
+                        "entire_legal_entity_price_multiplier_3": 30,
+                    }
+                ]
+            },
+            "linked_records": {"licenses": []},
+        }
+
+        result = build_usage_report_result(
+            "company",
+            "LinkFixer Example",
+            summary,
+            {"source_rows": 2, "company_count": 1},
+            crm_context=crm_context,
+            solo_context={"configured": True, "metrics": {"activations": 1}},
+            ip_geolocation_context={"records": {}},
+        )
+
+        report_text = result["report_text"]
+        self.assertIn("Entitlement denominator: 1,700 from CRM Customer License employee_or_computer_count (Employee)", report_text)
+        self.assertIn("license code 70006914", report_text)
+        self.assertIn("SOLO password present", report_text)
+        self.assertNotIn("MER4457", report_text)
+        self.assertIn("employee/computer count 1700", report_text)
+        self.assertIn("subset license count 1700", report_text)
+        self.assertIn("entire legal entity personnel 1700", report_text)

@@ -51,6 +51,23 @@ Parameters:
     NoEcho: true
     Default: ""
     Description: Optional Aurora PostgreSQL URL for CRM active-license lookups.
+  AuroraDataApiClusterArn:
+    Type: String
+    Default: arn:aws:rds:us-east-1:888442823671:cluster:axiom-zoho-crm-sync
+    Description: Optional RDS Data API cluster ARN for Zoho CRM Aurora lookups.
+  AuroraDataApiSecretArn:
+    Type: String
+    NoEcho: true
+    Default: arn:aws:secretsmanager:us-east-1:888442823671:secret:axiom/aurora-readonly-zoho-crm-HM5izG
+    Description: Optional read-only Secrets Manager secret ARN for Zoho CRM Aurora lookups.
+  AuroraDataApiDatabase:
+    Type: String
+    Default: zoho_crm
+    Description: Aurora database name for RDS Data API lookups.
+  AuroraCrmSchema:
+    Type: String
+    Default: zoho
+    Description: Schema containing the Zoho CRM sync tables.
   DynamoDBSourceRoleArn:
     Type: String
     Default: ""
@@ -232,6 +249,15 @@ Resources:
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${TeamsAppSecretName}*"
+              - Effect: Allow
+                Action:
+                  - rds-data:ExecuteStatement
+                  - rds-data:BatchExecuteStatement
+                Resource: !Ref AuroraDataApiClusterArn
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref AuroraDataApiSecretArn
 
   ApiFunction:
     Type: AWS::Lambda::Function
@@ -258,6 +284,10 @@ Resources:
           ATHENA_OUTPUT_S3_URI: !Sub "s3://${AthenaResultsBucket}/"
           GLUE_DATABASE_NAME: !If [CreateGlueCatalog, !Ref GlueDatabase, ""]
           AURORA_DATABASE_URL: !Ref AuroraDatabaseUrl
+          DB_CLUSTER_ARN: !Ref AuroraDataApiClusterArn
+          DB_SECRET_ARN: !Ref AuroraDataApiSecretArn
+          DB_NAME: !Ref AuroraDataApiDatabase
+          AURORA_CRM_SCHEMA: !Ref AuroraCrmSchema
 
   ApiFunctionUrl:
     Type: AWS::Lambda::Url

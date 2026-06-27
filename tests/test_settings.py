@@ -28,6 +28,8 @@ class SettingsTests(TestCase):
                         "MICROSOFT_APP_TENANT_ID=tenant-id",
                         "RAW_S3_BUCKET=raw-bucket",
                         "REPORT_S3_BUCKET=reports-bucket",
+                        "USAGE_SUMMARY_S3_KEY=curated/aws/custom_usage.json",
+                        "SOLO_SUMMARY_S3_KEY=curated/solo/custom_solo.json",
                         "AURORA_CRM_SCHEMA=crm",
                         "AURORA_CRM_ACCOUNTS_TABLE=crm_accounts",
                         "AURORA_CRM_COMPANY_NAME_COLUMN=account_name",
@@ -76,6 +78,8 @@ class SettingsTests(TestCase):
             self.assertEqual(settings.microsoft_app_tenant_id, "tenant-id")
             self.assertEqual(settings.raw_s3_bucket, "raw-bucket")
             self.assertEqual(settings.report_s3_bucket, "reports-bucket")
+            self.assertEqual(settings.usage_summary_s3_key, "curated/aws/custom_usage.json")
+            self.assertEqual(settings.solo_summary_s3_key, "curated/solo/custom_solo.json")
             self.assertEqual(settings.aurora_crm_schema, "crm")
             self.assertEqual(settings.aurora_crm_accounts_table, "crm_accounts")
             self.assertEqual(settings.aurora_crm_company_name_column, "account_name")
