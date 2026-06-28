@@ -190,13 +190,25 @@ class BotFrameworkActivityHandler:
         activity_type = str(activity.get("type") or "").lower()
         if activity_type == "message":
             text = activity_message_text(activity)
+            progress_replies: list[dict[str, Any]] = []
             if not text:
                 reply_text = "Send me a license ID, company name, or license usage question and I will help investigate it."
             else:
-                response = teams_service.handle_message(text, activity_user_id(activity))
+                def send_progress(progress_text: str) -> None:
+                    progress_replies.append(self.reply_client.reply_to_activity(activity, progress_text))
+
+                response = teams_service.handle_message(
+                    text,
+                    activity_user_id(activity),
+                    progress_callback=send_progress,
+                )
                 reply_text = str(response.get("message") or "I received that, but I do not have a text response yet.")
             reply_response = self.reply_client.reply_to_activity(activity, reply_text)
-            return {"type": "bot_framework_message", "reply": reply_response}
+            return {
+                "type": "bot_framework_message",
+                "reply": reply_response,
+                "progress_replies": progress_replies,
+            }
 
         if activity_type == "conversationupdate":
             welcome_text = conversation_update_welcome_text(activity)

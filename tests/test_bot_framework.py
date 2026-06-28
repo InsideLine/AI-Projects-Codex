@@ -1,3 +1,5 @@
+import tempfile
+from pathlib import Path
 from unittest import TestCase
 
 from license_agent.bot_framework import (
@@ -93,3 +95,39 @@ class BotFrameworkTests(TestCase):
         )
         self.assertEqual(response["type"], "bot_framework_message")
         self.assertEqual(reply_client.replies[0][1], "No report requests have been queued yet for this user.")
+
+    def test_handler_sends_progress_reply_before_synchronous_report(self) -> None:
+        reply_client = CapturingReplyClient()
+        handler = BotFrameworkActivityHandler(
+            credentials=BotFrameworkCredentials(app_id="app-id", app_password="app-password"),
+            reply_client=reply_client,
+            authenticator=AllowAllAuthenticator(),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = TeamsChatService(
+                LicenseAgentSettings(
+                    app_db_path=str(Path(temp_dir) / "app.sqlite3"),
+                    report_output_root=str(Path(temp_dir) / "reports"),
+                ),
+                run_async=False,
+            )
+            response = handler.handle(
+                activity={
+                    "type": "message",
+                    "id": "activity-id",
+                    "serviceUrl": "https://smba.trafficmanager.net/teams/",
+                    "from": {"id": "user-id"},
+                    "recipient": {"id": "bot-id"},
+                    "conversation": {"id": "conversation-id"},
+                    "text": "<at>License Analyzer</at> company Example Corp",
+                },
+                authorization_header="Bearer token",
+                teams_service=service,
+            )
+
+        self.assertEqual(response["type"], "bot_framework_message")
+        self.assertEqual(len(reply_client.replies), 2)
+        self.assertIn("I'm working on the report for company `Example Corp` now.", reply_client.replies[0][1])
+        self.assertIn("I completed the report for company `Example Corp`.", reply_client.replies[1][1])
+        self.assertNotIn("job-", reply_client.replies[0][1])
+        self.assertNotIn("job-", reply_client.replies[1][1])

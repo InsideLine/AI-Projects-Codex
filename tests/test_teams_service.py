@@ -132,7 +132,8 @@ class TeamsChatServiceTests(TestCase):
             self.assertEqual(job["status"], "completed")
             self.assertEqual(job["subject_type"], "license")
             history = service.handle_message("history", "analyst@example.com")
-            self.assertIn(job_id, history["message"])
+            self.assertIn("license `66275132`", history["message"])
+            self.assertNotIn(job_id, history["message"])
 
     def test_feedback_records_preference(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -254,10 +255,12 @@ class TeamsChatServiceTests(TestCase):
             self.assertIn("**License Violation Review: Mediterranean Shipping Company Pty Ltd**", request["message"])
             self.assertIn("66,827", request["message"])
             self.assertNotIn("Ask for `status", request["message"])
+            self.assertNotIn("job-", request["message"])
             response = service.handle_message(f"status {request['job_id']}", "analyst@example.com")
 
         self.assertIn("**License Violation Review: Mediterranean Shipping Company Pty Ltd**", response["message"])
         self.assertIn("Files processed: 66,827", response["message"])
+        self.assertNotIn("job-", response["message"])
         self.assertIn("License usage appears on multiple MAC addresses", response["message"])
         self.assertTrue(response["job"]["result"]["data_connected"])
 

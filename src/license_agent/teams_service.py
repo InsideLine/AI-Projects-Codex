@@ -5,7 +5,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .agent import LicenseViolationAgent
 from .chat_store import ChatStore
@@ -51,14 +51,20 @@ class TeamsChatService:
         self.run_async = run_async
         self._lock = threading.Lock()
 
-    def handle_message(self, text: str, user_email: str | None = None) -> dict[str, Any]:
+    def handle_message(
+        self,
+        text: str,
+        user_email: str | None = None,
+        *,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
         user_id = (user_email or "anonymous").strip() or "anonymous"
         stripped = text.strip()
         self.store.save_message(user_id, "user", stripped)
         last_job = self.store.last_completed_job(user_id)
         clarification = self._resolve_pending_company_selection(user_id, stripped)
         if clarification:
-            response = self._enqueue_report(user_id, "company", clarification)
+            response = self._enqueue_report(user_id, "company", clarification, progress_callback=progress_callback)
             self.store.save_message(user_id, "assistant", str(response.get("message", "")))
             return response
         intent = parse_intent(stripped, last_job=last_job)
@@ -80,7 +86,12 @@ class TeamsChatService:
         elif intent.kind == "help":
             response = self._help(user_id)
         elif intent.kind == "report_request" and intent.subject_type and intent.subject_value:
-            response = self._enqueue_report(user_id, intent.subject_type, intent.subject_value)
+            response = self._enqueue_report(
+                user_id,
+                intent.subject_type,
+                intent.subject_value,
+                progress_callback=progress_callback,
+            )
         else:
             response = self._help(user_id)
 
@@ -120,8 +131,8 @@ class TeamsChatService:
             "type": "help",
             "message": (
                 "Ask for `license 66275132` or `company Hudson Housing Capital LLC` to queue a report. "
-                "Use `status <job_id>` to check a queued report, `history` to see recent requests, and "
-                "`feedback <finding_code> accepted|wrong <comment>` to teach the bot from a review. "
+                "Use `history` to see recent requests, and `feedback <finding_code> accepted|wrong <comment>` "
+                "to teach the bot from a review. "
                 "Natural language is fine too, like 'Can you check Hudson Housing Capital LLC?'"
                 + memory_hint
             ),
@@ -137,8 +148,8 @@ class TeamsChatService:
             latest = recent_jobs[0]
             message = (
                 f"You have {summary['total_jobs']} queued or completed report request(s). "
-                f"The latest is `{latest['job_id']}` for {latest['subject_type']} `{latest['subject_value']}` "
-                f"with status `{latest['status']}`."
+                f"The latest is for {latest['subject_type']} `{latest['subject_value']}` "
+                f"and is `{latest['status']}`."
             )
         return {"type": "history", "message": message, "state": self.state(user_id)}
 
@@ -208,7 +219,14 @@ class TeamsChatService:
             "state": self.state(user_id),
         }
 
-    def _enqueue_report(self, user_id: str, subject_type: str, subject_value: str) -> dict[str, Any]:
+    def _enqueue_report(
+        self,
+        user_id: str,
+        subject_type: str,
+        subject_value: str,
+        *,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
         if subject_type == "company":
             clarification = self._company_clarification_response(user_id, subject_value)
             if clarification is not None:
@@ -221,14 +239,14 @@ class TeamsChatService:
             subject_value=subject_value,
             payload=payload,
         )
+        progress_message = _report_progress_message(subject_type, subject_value)
         if self.run_async:
             thread = threading.Thread(target=self._process_report_job, args=(job["job_id"],), daemon=True)
             thread.start()
-            message = (
-                f"I started report job {job['job_id']} for {subject_type} {subject_value}. "
-                "I am gathering the available license, usage, and CRM context now."
-            ).replace("{job_id}", job["job_id"])
+            message = progress_message
         else:
+            if progress_callback is not None:
+                progress_callback(progress_message)
             self._process_report_job(job["job_id"])
             completed_job = self.store.get_job(job["job_id"]) or job
             message = self._completed_report_message(completed_job)
@@ -244,11 +262,11 @@ class TeamsChatService:
         if not job or job["user_id"] != user_id:
             return {
                 "type": "job_status",
-                "message": f"I could not find job `{job_id}` for this user.",
+                "message": "I could not find that report for this user.",
                 "state": self.state(user_id),
             }
         message = (
-            f"Job `{job_id}` for {job['subject_type']} `{job['subject_value']}` is `{job['status']}`."
+            f"The report for {job['subject_type']} `{job['subject_value']}` is `{job['status']}`."
         )
         if job.get("status") == "completed" and isinstance(job.get("result"), dict):
             message = self._completed_report_message(job)
@@ -538,7 +556,7 @@ class TeamsChatService:
                     f"Evaluation: {result.get('evaluation', 'unknown')}. "
                     f"Findings: {result.get('finding_count', 0)}."
                 )
-        message = f"Completed report job {job['job_id']}.\n\n{report_text}"
+        message = f"I completed the report for {job['subject_type']} `{job['subject_value']}`.\n\n{report_text}"
         word_report = result.get("word_report") if isinstance(result, dict) else None
         if isinstance(word_report, dict) and word_report.get("url"):
             message += f"\n\n**Word report:** [Download DOCX]({word_report['url']})"
@@ -607,6 +625,14 @@ class TeamsChatService:
                 return None
             return payload if isinstance(payload, dict) else None
         return None
+
+
+def _report_progress_message(subject_type: str, subject_value: str) -> str:
+    label = "license" if subject_type == "license" else "company"
+    return (
+        f"I'm working on the report for {label} `{subject_value}` now. "
+        "I'm gathering the available usage, licensing, CRM, and geolocation context and will send the report here when it is ready."
+    )
 
 
 def parse_intent(text: str, *, last_job: dict[str, Any] | None = None) -> ParsedIntent:
