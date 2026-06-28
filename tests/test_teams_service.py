@@ -409,6 +409,88 @@ class TeamsChatServiceTests(TestCase):
         self.assertIn("estimated personnel 200000", report_text)
         self.assertNotIn("Licensed personnel count is missing", report_text)
 
+    def test_report_performs_automated_scope_and_prior_review_checks(self) -> None:
+        summary = {
+            "company_name": "Rockwool Bv",
+            "license_ids": ["63818402"],
+            "files_processed": 100,
+            "links_processed": 200,
+            "file_size_gib": 500,
+            "file_size_in_bytes": 536870912000,
+            "run_count": 5,
+            "machine_count": 2,
+            "mac_count": 2,
+            "public_ip_count": 0,
+        }
+        crm_context = {
+            "configured": True,
+            "error": "",
+            "license_lookup": {
+                "rows": [
+                    {
+                        "name": "Gold -- LFA",
+                        "license_code": "63818402",
+                        "company_name": "Rockwool A/S",
+                        "active_license": False,
+                        "maintenance_expiry_date": "2025-05-20",
+                        "which_count_to_use": "Employee",
+                        "employee_or_computer_count": 125,
+                        "organization_description": "Rockwool BV, located at Industrieweg 15, JG Roermond, Netherlands",
+                    }
+                ]
+            },
+            "linked_records": {
+                "licenses": [
+                    {
+                        "linked_records": {
+                            "sales_routing_forms": [
+                                {
+                                    "name": "SRF-1",
+                                    "license_violation": True,
+                                    "unresolved_license_violation": True,
+                                }
+                            ],
+                            "license_verifications": [],
+                            "quote_line_item_sets": [{"quantity": 125}],
+                        }
+                    }
+                ]
+            },
+        }
+        ip_context = {
+            "records": {
+                "154.14.23.182": {
+                    "city": "Wijnegem",
+                    "region": "Flanders",
+                    "country": "Belgium",
+                    "accuracy_radius_km": 20,
+                }
+            },
+            "activation_ips": ["154.14.23.182"],
+        }
+
+        result = build_usage_report_result(
+            "company",
+            "Rockwool",
+            summary,
+            {"source_rows": 5, "company_count": 1},
+            crm_context=crm_context,
+            solo_context={"configured": True, "metrics": {"activations": 1, "license_ids": ["63818402"]}},
+            ip_geolocation_context=ip_context,
+        )
+
+        report_text = result["report_text"]
+        finding_codes = {item["code"] for item in result["findings"]}
+        self.assertIn("**Automated Consistency Checks**", report_text)
+        self.assertIn("parsed allowed countries netherlands; regions/states limburg; cities roermond", report_text.lower())
+        self.assertIn("Geography scope check: 1 geolocated IP location(s) appear outside", report_text)
+        self.assertIn("Prior CRM review check: found 1 prior license-violation signal", report_text)
+        self.assertIn("Count consistency check: comparable CRM entitlement/count signals are consistent", report_text)
+        self.assertIn("geography_outside_crm_scope", finding_codes)
+        self.assertIn("prior_crm_violation_signal", finding_codes)
+        self.assertNotIn("Recommended Next Review Steps", report_text)
+        self.assertIn("**Human Review Still Needed**", report_text)
+
     def test_report_flags_usage_over_threshold_when_crm_personnel_is_available(self) -> None:
         summary = {
             "company_name": "Example Corp",

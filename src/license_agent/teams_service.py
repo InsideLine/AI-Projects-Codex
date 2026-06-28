@@ -976,6 +976,14 @@ def _usage_report_findings(
                 "evidence": {"public_ips": summary.get("public_ips") or []},
             }
         )
+    findings.extend(
+        _automated_consistency_findings(
+            summary=summary,
+            crm_context=crm_context,
+            solo_context=solo_context,
+            ip_geolocation_context=ip_geolocation_context,
+        )
+    )
     return findings
 
 
@@ -1039,6 +1047,12 @@ def _usage_report_document(
     solo_section = _solo_report_section(solo_context)
     ip_section = _ip_geolocation_report_section(ip_geolocation_context, summary.get("public_ips") or [])
     threshold_section = _eula_threshold_report_section(summary, crm_context, solo_context)
+    consistency_section = _automated_consistency_report_section(
+        summary=summary,
+        crm_context=crm_context,
+        solo_context=solo_context,
+        ip_geolocation_context=ip_geolocation_context,
+    )
     missing_items = _missing_data_items(
         crm_context=crm_context,
         solo_context=solo_context,
@@ -1086,13 +1100,14 @@ def _usage_report_document(
         solo_section,
         ip_section,
         crm_section,
+        consistency_section,
         {
             "heading": "Findings",
             "bullets": findings_bullets,
         },
         {
-            "heading": "Recommended Next Review Steps",
-            "bullets": _recommended_next_steps(ip_geolocation_context),
+            "heading": "Human Review Still Needed",
+            "bullets": _human_review_steps(ip_geolocation_context),
         },
     ]
     if missing_items:
@@ -1112,19 +1127,19 @@ def _usage_report_document(
     }
 
 
-def _recommended_next_steps(ip_geolocation_context: dict[str, Any]) -> list[str]:
+def _human_review_steps(ip_geolocation_context: dict[str, Any]) -> list[str]:
     steps = [
-        "Review CRM organization scope against the SOLO and AWS usage geography.",
-        "Review License Verification and Sales Routing Form records for prior analyst conclusions or unresolved violation flags.",
-        "Use the GiB per entitlement-unit calculation as a review trigger, not as proof of a violation.",
+        "Confirm that the CRM organization definition is the complete contractual scope.",
+        "Treat the GiB per entitlement-unit calculation as a review trigger, not as proof of a violation.",
+        "Use GeoLite2 locations as approximate city/region signals, not exact physical addresses.",
     ]
     requested_ips = set(ip_geolocation_context.get("public_ips") or []) | set(ip_geolocation_context.get("activation_ips") or [])
     if ip_geolocation_context.get("records"):
-        steps.append("Compare enriched IP cities/countries to the CRM organization definition.")
+        steps.append("Confirm whether any automated geography mismatches have a legitimate business explanation.")
     elif requested_ips:
-        steps.append("Backfill IP geolocation cache and compare enriched IP cities/countries to the CRM organization definition.")
+        steps.append("Backfill missing IP geolocation before relying on geography conclusions.")
     else:
-        steps.append("No public IP geography was available in the connected usage data; use CRM scope and identity-spread evidence for this review.")
+        steps.append("No public IP geography was available; use CRM scope and identity-spread evidence for review.")
     return steps
 
 
@@ -1451,6 +1466,371 @@ def _ip_geolocation_report_section(ip_context: dict[str, Any], public_ips: list[
     }
 
 
+def _automated_consistency_report_section(
+    *,
+    summary: dict[str, Any],
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+    ip_geolocation_context: dict[str, Any],
+) -> dict[str, Any]:
+    check = _automated_consistency_check(
+        summary=summary,
+        crm_context=crm_context,
+        solo_context=solo_context,
+        ip_geolocation_context=ip_geolocation_context,
+    )
+    return {
+        "heading": "Automated Consistency Checks",
+        "body": [
+            "These checks are performed by the agent from connected CRM, SOLO, AWS usage, and geolocation data. They are evidence triage, not final legal conclusions."
+        ],
+        "bullets": check["bullets"],
+    }
+
+
+def _automated_consistency_findings(
+    *,
+    summary: dict[str, Any],
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+    ip_geolocation_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    check = _automated_consistency_check(
+        summary=summary,
+        crm_context=crm_context,
+        solo_context=solo_context,
+        ip_geolocation_context=ip_geolocation_context,
+    )
+    findings: list[dict[str, Any]] = []
+    geography = check["geography"]
+    if geography["outside_locations"]:
+        findings.append(
+            {
+                "code": "geography_outside_crm_scope",
+                "title": "Geography appears outside CRM organization scope",
+                "severity": "medium",
+                "detail": (
+                    "The CRM organization definition contains geography hints, and one or more geolocated "
+                    "AWS/SOLO IP locations are outside those hints."
+                ),
+                "evidence": {
+                    "scope_texts": geography["scope_texts"],
+                    "allowed_countries": sorted(geography["allowed_countries"]),
+                    "allowed_regions": sorted(geography["allowed_regions"]),
+                    "outside_locations": geography["outside_locations"],
+                },
+            }
+        )
+    prior = check["prior_review"]
+    if prior["flagged_records"]:
+        findings.append(
+            {
+                "code": "prior_crm_violation_signal",
+                "title": "Prior CRM records contain license-violation signals",
+                "severity": "high" if prior["unresolved_count"] else "medium",
+                "detail": (
+                    f"CRM linked records include {prior['flagged_count']} license-violation flag(s), "
+                    f"including {prior['unresolved_count']} unresolved flag(s)."
+                ),
+                "evidence": {"flagged_records": prior["flagged_records"]},
+            }
+        )
+    count_check = check["counts"]
+    if count_check["mismatches"]:
+        findings.append(
+            {
+                "code": "entitlement_count_inconsistency",
+                "title": "Entitlement count signals are inconsistent",
+                "severity": "medium",
+                "detail": "CRM Customer License, quote line item, or license-verification count signals do not agree.",
+                "evidence": {"signals": count_check["signals"], "mismatches": count_check["mismatches"]},
+            }
+        )
+    return findings
+
+
+def _automated_consistency_check(
+    *,
+    summary: dict[str, Any],
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+    ip_geolocation_context: dict[str, Any],
+) -> dict[str, Any]:
+    geography = _geography_consistency_check(crm_context, ip_geolocation_context)
+    prior_review = _prior_review_consistency_check(crm_context)
+    counts = _count_consistency_check(summary, crm_context, solo_context)
+    bullets: list[str] = []
+    bullets.extend(_geography_check_bullets(geography))
+    bullets.extend(_prior_review_check_bullets(prior_review))
+    bullets.extend(_count_check_bullets(counts))
+    return {
+        "geography": geography,
+        "prior_review": prior_review,
+        "counts": counts,
+        "bullets": bullets or ["No automated consistency checks could be completed from the connected data."],
+    }
+
+
+def _geography_consistency_check(crm_context: dict[str, Any], ip_context: dict[str, Any]) -> dict[str, Any]:
+    scope_texts = _organization_scope_texts(crm_context)
+    scope = _parse_scope_geography(scope_texts)
+    records = ip_context.get("records") or {}
+    outside_locations: list[str] = []
+    inside_locations: list[str] = []
+    inconclusive_locations: list[str] = []
+    for ip_address, record in sorted(records.items()):
+        if not isinstance(record, dict):
+            continue
+        country = str(record.get("country") or "").strip()
+        region = str(record.get("region") or "").strip()
+        city = str(record.get("city") or "").strip()
+        label = _geo_record_label(ip_address, record)
+        if not scope["allowed_countries"] and not scope["allowed_regions"] and not scope["allowed_cities"]:
+            inconclusive_locations.append(label)
+            continue
+        if _geo_record_within_scope(country=country, region=region, city=city, scope=scope):
+            inside_locations.append(label)
+        else:
+            outside_locations.append(label)
+    return {
+        **scope,
+        "scope_texts": scope_texts,
+        "inside_locations": inside_locations,
+        "outside_locations": outside_locations,
+        "inconclusive_locations": inconclusive_locations,
+        "checked_location_count": len(inside_locations) + len(outside_locations) + len(inconclusive_locations),
+    }
+
+
+def _prior_review_consistency_check(crm_context: dict[str, Any]) -> dict[str, Any]:
+    flagged_records: list[str] = []
+    unresolved_count = 0
+    srf_count = 0
+    lv_count = 0
+    for item in ((crm_context.get("linked_records") or {}).get("licenses") or []):
+        linked = item.get("linked_records") or {}
+        for srf in linked.get("sales_routing_forms") or []:
+            srf_count += 1
+            label = f"Sales Routing Form {srf.get('name') or srf.get('id') or 'unknown'}"
+            if _truthy(srf.get("license_violation")) or _truthy(srf.get("unresolved_license_violation")):
+                if _truthy(srf.get("unresolved_license_violation")):
+                    unresolved_count += 1
+                flagged_records.append(
+                    f"{label}: license_violation={srf.get('license_violation')}, unresolved_license_violation={srf.get('unresolved_license_violation')}"
+                )
+        for lv in linked.get("license_verifications") or []:
+            lv_count += 1
+            status = " ".join(str(value or "") for value in (lv.get("stage"), lv.get("current_status"))).lower()
+            if any(word in status for word in ("violation", "unresolved", "investigat")):
+                flagged_records.append(
+                    f"License Verification {lv.get('name') or lv.get('id') or 'unknown'}: stage={lv.get('stage') or 'unknown'}; status={_truncate(str(lv.get('current_status') or ''), 120)}"
+                )
+    return {
+        "srf_count": srf_count,
+        "license_verification_count": lv_count,
+        "flagged_count": len(flagged_records),
+        "unresolved_count": unresolved_count,
+        "flagged_records": flagged_records,
+    }
+
+
+def _count_consistency_check(
+    summary: dict[str, Any],
+    crm_context: dict[str, Any],
+    solo_context: dict[str, Any],
+) -> dict[str, Any]:
+    signals: list[dict[str, Any]] = []
+    personnel_signal = _licensed_personnel_signal(crm_context=crm_context, solo_context=solo_context)
+    if personnel_signal.get("value"):
+        signals.append({"source": personnel_signal.get("source"), "value": float(personnel_signal["value"]), "role": "entitlement_denominator"})
+    for item in ((crm_context.get("linked_records") or {}).get("licenses") or []):
+        linked = item.get("linked_records") or {}
+        qli_quantity = _quantity_from_rows(linked.get("quote_line_item_sets") or [])
+        if qli_quantity is not None:
+            signals.append({"source": "CRM quote line item quantity", "value": float(qli_quantity), "role": "quote_quantity"})
+        for lv in linked.get("license_verifications") or []:
+            value = _positive_number(lv.get("personnel_count"))
+            if value is not None:
+                signals.append({"source": "CRM License Verification personnel_count", "value": float(value), "role": "verification_personnel"})
+    metrics = solo_context.get("metrics") or {}
+    solo_quantity = _positive_number(metrics.get("solo_entitlement_count") or metrics.get("q_ordered_total"))
+    if solo_quantity is not None:
+        signals.append({"source": metrics.get("solo_entitlement_source") or "SOLO export quantity", "value": float(solo_quantity), "role": "solo_quantity"})
+    mismatches: list[str] = []
+    comparable = [item for item in signals if item["role"] in {"entitlement_denominator", "quote_quantity", "verification_personnel"}]
+    if len(comparable) > 1:
+        values = [item["value"] for item in comparable]
+        if min(values) > 0 and max(values) / min(values) > 1.1:
+            mismatches.append(
+                "Comparable CRM entitlement/count signals differ: "
+                + "; ".join(f"{item['source']}={_format_int(item['value'])}" for item in comparable)
+            )
+    if summary.get("license_ids") and metrics.get("license_ids"):
+        usage_license_ids = {str(value) for value in summary.get("license_ids") or []}
+        solo_license_ids = {str(value) for value in metrics.get("license_ids") or []}
+        if not usage_license_ids.intersection(solo_license_ids):
+            mismatches.append("AWS usage license IDs do not overlap the matched SOLO summary license IDs.")
+    return {"signals": signals, "mismatches": mismatches}
+
+
+def _geography_check_bullets(geography: dict[str, Any]) -> list[str]:
+    if not geography["scope_texts"]:
+        return ["Geography scope check: no CRM organization definition text was available to parse."]
+    scope_bits = []
+    if geography["allowed_countries"]:
+        scope_bits.append("countries " + ", ".join(sorted(geography["allowed_countries"])))
+    if geography["allowed_regions"]:
+        scope_bits.append("regions/states " + ", ".join(sorted(geography["allowed_regions"])))
+    if geography["allowed_cities"]:
+        scope_bits.append("cities " + ", ".join(sorted(geography["allowed_cities"])))
+    if not scope_bits:
+        return ["Geography scope check: CRM organization definition was present, but no usable city/state/country hints were parsed."]
+    bullets = [f"Geography scope check: parsed allowed {'; '.join(scope_bits)} from CRM organization definition."]
+    if geography["outside_locations"]:
+        bullets.append(
+            f"Geography scope check: {len(geography['outside_locations'])} geolocated IP location(s) appear outside the parsed CRM scope. Sample: {_sample_list(geography['outside_locations'], limit=4)}"
+        )
+    elif geography["inside_locations"]:
+        bullets.append(f"Geography scope check: all {len(geography['inside_locations'])} geolocated IP location(s) matched the parsed CRM scope.")
+    elif geography["inconclusive_locations"]:
+        bullets.append("Geography scope check: IP locations were available, but the parsed scope was not specific enough for a confident comparison.")
+    return bullets
+
+
+def _prior_review_check_bullets(prior_review: dict[str, Any]) -> list[str]:
+    bullets = [
+        f"Prior CRM review check: sampled {prior_review['srf_count']} Sales Routing Form record(s) and {prior_review['license_verification_count']} License Verification record(s)."
+    ]
+    if prior_review["flagged_records"]:
+        bullets.append(
+            f"Prior CRM review check: found {prior_review['flagged_count']} prior license-violation signal(s), including {prior_review['unresolved_count']} unresolved flag(s). Sample: {_sample_list(prior_review['flagged_records'], limit=3)}"
+        )
+    else:
+        bullets.append("Prior CRM review check: no sampled SRF or License Verification record contained a prior violation flag.")
+    return bullets
+
+
+def _count_check_bullets(counts: dict[str, Any]) -> list[str]:
+    if not counts["signals"]:
+        return ["Count consistency check: no entitlement or license-count signals were available."]
+    bullets = [
+        "Count consistency check: "
+        + "; ".join(f"{item['source']}={_format_int(item['value'])}" for item in counts["signals"][:5])
+    ]
+    if counts["mismatches"]:
+        bullets.append("Count consistency check: " + " ".join(counts["mismatches"]))
+    else:
+        bullets.append("Count consistency check: comparable CRM entitlement/count signals are consistent or not directly comparable.")
+    return bullets
+
+
+def _organization_scope_texts(crm_context: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    for row in ((crm_context.get("license_lookup") or {}).get("rows") or []):
+        for key in ("organization_description", "scope", "site", "company_name", "company"):
+            value = row.get(key)
+            if value:
+                texts.append(str(value))
+    for item in ((crm_context.get("linked_records") or {}).get("licenses") or []):
+        linked = item.get("linked_records") or {}
+        for lv in linked.get("license_verifications") or []:
+            for key in ("organization_definition", "current_status"):
+                value = lv.get(key)
+                if value:
+                    texts.append(str(value))
+    return _dedupe_preserve_order([text.strip() for text in texts if text.strip()])
+
+
+def _parse_scope_geography(scope_texts: list[str]) -> dict[str, set[str]]:
+    text = " ".join(scope_texts).lower()
+    allowed_countries = {
+        canonical
+        for canonical, aliases in COUNTRY_HINTS.items()
+        if any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases)
+    }
+    allowed_regions = {
+        canonical
+        for canonical, aliases in REGION_HINTS.items()
+        if any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases)
+    }
+    allowed_cities = {
+        canonical
+        for canonical, payload in CITY_HINTS.items()
+        if re.search(rf"\b{re.escape(canonical)}\b", text)
+    }
+    for city in allowed_cities:
+        payload = CITY_HINTS.get(city) or {}
+        if payload.get("country"):
+            allowed_countries.add(str(payload["country"]))
+        if payload.get("region"):
+            allowed_regions.add(str(payload["region"]))
+    return {
+        "allowed_countries": allowed_countries,
+        "allowed_regions": allowed_regions,
+        "allowed_cities": allowed_cities,
+    }
+
+
+def _geo_record_within_scope(*, country: str, region: str, city: str, scope: dict[str, set[str]]) -> bool:
+    country_key = country.lower().strip()
+    region_key = region.lower().strip()
+    city_key = city.lower().strip()
+    if scope["allowed_regions"]:
+        return region_key in scope["allowed_regions"]
+    if scope["allowed_cities"]:
+        return city_key in scope["allowed_cities"]
+    if scope["allowed_countries"]:
+        return country_key in scope["allowed_countries"]
+    return False
+
+
+def _geo_record_label(ip_address: str, record: dict[str, Any]) -> str:
+    city = record.get("city") or "unknown city"
+    region = record.get("region") or ""
+    country = record.get("country") or "unknown country"
+    region_text = f", {region}" if region else ""
+    return f"{ip_address}: {city}{region_text}, {country}"
+
+
+COUNTRY_HINTS = {
+    "australia": ("australia",),
+    "belgium": ("belgium",),
+    "canada": ("canada",),
+    "china": ("china",),
+    "denmark": ("denmark",),
+    "germany": ("germany",),
+    "hong kong": ("hong kong",),
+    "india": ("india",),
+    "malaysia": ("malaysia",),
+    "netherlands": ("netherlands", "holland"),
+    "singapore": ("singapore",),
+    "south africa": ("south africa",),
+    "united kingdom": ("united kingdom", "uk", "england", "scotland", "wales"),
+    "united states": ("united states", "usa", "u.s.", "us"),
+}
+
+
+REGION_HINTS = {
+    "california": ("california", "ca"),
+    "florida": ("florida", "fl"),
+    "limburg": ("limburg",),
+    "new south wales": ("new south wales", "nsw"),
+    "new york": ("new york", "ny"),
+    "ontario": ("ontario",),
+    "texas": ("texas", "tx"),
+    "utah": ("utah", "ut"),
+    "western cape": ("western cape",),
+}
+
+
+CITY_HINTS = {
+    "roermond": {"region": "limburg", "country": "netherlands"},
+    "cape town": {"region": "western cape", "country": "south africa"},
+    "sydney": {"region": "new south wales", "country": "australia"},
+    "new york": {"region": "new york", "country": "united states"},
+}
+
+
 def _missing_data_items(
     *,
     crm_context: dict[str, Any],
@@ -1641,6 +2021,25 @@ def _first_nonempty(*values: Any) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "checked"}
 
 
 def _truncate(value: str, limit: int) -> str:
