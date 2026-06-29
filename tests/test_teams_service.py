@@ -107,6 +107,11 @@ class TeamsIntentTests(TestCase):
         intent = parse_intent("Have we seen this company using the same license across multiple machines?")
         self.assertEqual(intent.kind, "follow_up_question")
 
+    def test_parses_this_license_ip_question_as_follow_up(self) -> None:
+        intent = parse_intent("Is the number of different IP locations that this license was found unusual?")
+        self.assertEqual(intent.kind, "follow_up_question")
+        self.assertNotEqual(intent.subject_value, "ense")
+
     def test_parses_data_query(self) -> None:
         intent = parse_intent("What are the strongest violation signals?")
         self.assertEqual(intent.kind, "data_query")
@@ -261,6 +266,56 @@ class TeamsChatServiceTests(TestCase):
             response = service.handle_message("Why did you flag this as suspicious?", "analyst@example.com")
             self.assertEqual(response["type"], "explanation")
             self.assertIn("usage_over_eula_review_threshold", response["message"])
+
+    def test_ip_location_follow_up_answers_from_latest_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = LicenseAgentSettings(
+                app_db_path=str(Path(temp_dir) / "app.sqlite3"),
+                report_output_root=str(Path(temp_dir) / "reports"),
+            )
+            service = TeamsChatService(settings, run_async=False)
+            job = service.store.create_job(
+                user_id="analyst@example.com",
+                job_type="investigation_report",
+                subject_type="company",
+                subject_value="Example Corp",
+                payload={"subject_type": "company", "subject_value": "Example Corp"},
+            )
+            service.store.mark_completed(
+                job["job_id"],
+                {
+                    "subject": "Example Corp",
+                    "evaluation": "review recommended",
+                    "finding_count": 2,
+                    "findings": [
+                        {
+                            "code": "multiple_public_ips",
+                            "title": "Usage appears from multiple public IP addresses",
+                        }
+                    ],
+                    "usage_summary": {
+                        "public_ip_count": 3,
+                        "public_ips": ["1.1.1.1", "2.2.2.2", "3.3.3.3"],
+                    },
+                    "ip_geolocation_context": {
+                        "records": {
+                            "1.1.1.1": {"city": "Sydney", "region": "New South Wales", "country": "Australia"},
+                            "2.2.2.2": {"city": "Melbourne", "region": "Victoria", "country": "Australia"},
+                        }
+                    },
+                },
+            )
+
+            response = service.handle_message(
+                "Is the number of different IP locations that this license was found unusual?",
+                "analyst@example.com",
+            )
+
+        self.assertEqual(response["type"], "follow_up")
+        self.assertIn("The report shows 3 public IP address(es)", response["message"])
+        self.assertIn("worth reviewing", response["message"])
+        self.assertIn("Sydney, New South Wales, Australia", response["message"])
+        self.assertNotIn("license `ense`", response["message"])
 
     def test_data_query_routes_to_query_service(self) -> None:
         class FakeQueryService:

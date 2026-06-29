@@ -218,13 +218,7 @@ class TeamsChatService:
         if not latest_job:
             return self._answer_data_query(user_id, question)
         result = latest_job.get("result") or {}
-        message = (
-            f"I treated that as a follow-up about {latest_job['subject_type']} `{latest_job['subject_value']}`. "
-            f"The current local scaffold has report memory and conversational routing, but the live warehouse-backed "
-            f"question answering layer is still being connected. Right now the latest report says evaluation "
-            f"`{result.get('evaluation', 'unknown')}` with {result.get('finding_count', 0)} finding(s). "
-            "If you want a fresh report, ask me to check the company or license again."
-        )
+        message = _answer_report_follow_up_from_result(latest_job, result, question)
         return {
             "type": "follow_up",
             "message": message,
@@ -733,6 +727,95 @@ def _looks_like_non_company_memory_value(value: str) -> bool:
     return False
 
 
+def _answer_report_follow_up_from_result(
+    latest_job: dict[str, Any],
+    result: dict[str, Any],
+    question: str,
+) -> str:
+    lower = question.lower()
+    if _asks_about_ip_location_spread(lower):
+        return _answer_ip_location_spread_follow_up(latest_job, result)
+
+    findings = result.get("findings") or []
+    return (
+        f"I treated that as a follow-up about {latest_job['subject_type']} `{latest_job['subject_value']}`. "
+        f"The latest report evaluation is `{result.get('evaluation', 'unknown')}` with "
+        f"{result.get('finding_count', len(findings) if isinstance(findings, list) else 0)} finding(s). "
+        "Ask about a specific signal from the report, such as IP locations, machine names, MAC addresses, usage volume, or entitlement count, and I can answer from the saved report context."
+    )
+
+
+def _asks_about_ip_location_spread(lower: str) -> bool:
+    return (
+        any(term in lower for term in ("ip", "location", "locations", "geography", "geographic", "geo"))
+        and any(term in lower for term in ("unusual", "suspicious", "different", "spread", "many", "number"))
+    )
+
+
+def _answer_ip_location_spread_follow_up(latest_job: dict[str, Any], result: dict[str, Any]) -> str:
+    summary = result.get("usage_summary") if isinstance(result.get("usage_summary"), dict) else {}
+    ip_context = result.get("ip_geolocation_context") if isinstance(result.get("ip_geolocation_context"), dict) else {}
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    public_ip_count = int(summary.get("public_ip_count") or 0)
+    public_ips = [str(value) for value in summary.get("public_ips") or [] if str(value).strip()]
+    records = ip_context.get("records") if isinstance(ip_context.get("records"), dict) else {}
+    geo_locations = _geolocation_region_labels(records)
+    finding_codes = {str(item.get("code") or "") for item in findings if isinstance(item, dict)}
+
+    if public_ip_count <= 0 and not records:
+        return (
+            f"For the latest report on {latest_job['subject_type']} `{latest_job['subject_value']}`, I do not see public IP locations in the saved report context. "
+            "So I cannot say the IP-location count is unusual from that report alone."
+        )
+
+    if records:
+        location_phrase = (
+            f"{len(geo_locations)} distinct geolocated city/region/country value(s): "
+            + "; ".join(geo_locations[:6])
+        )
+        if len(geo_locations) > 6:
+            location_phrase += f"; plus {len(geo_locations) - 6} more"
+    else:
+        location_phrase = "geolocation was not available for those IPs"
+
+    if "geography_outside_crm_scope" in finding_codes:
+        assessment = (
+            "Yes, it is a review signal: at least one geolocated IP location appears outside the parsed CRM organization scope."
+        )
+    elif public_ip_count > 1 or len(geo_locations) > 1:
+        assessment = (
+            "It is worth reviewing, but not automatically a violation. Multiple IPs or locations can be normal for VPNs, cloud routing, remote staff, or large organizations; it becomes more concerning when the locations conflict with the licensed organization definition."
+        )
+    else:
+        assessment = "No strong IP-location spread signal stands out from the saved report."
+
+    ip_sample = _sample_list(public_ips, limit=6) if public_ips else "none listed"
+    return (
+        f"For the latest report on {latest_job['subject_type']} `{latest_job['subject_value']}`: {assessment} "
+        f"The report shows {public_ip_count} public IP address(es); sample IPs: {ip_sample}. "
+        f"Location context: {location_phrase}. "
+        "I would treat this as evidence to compare against the CRM organization definition, not as proof by itself."
+    )
+
+
+def _geolocation_region_labels(records: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for record in records.values():
+        if not isinstance(record, dict):
+            continue
+        city = str(record.get("city") or "unknown city").strip()
+        region = str(record.get("region") or "").strip()
+        country = str(record.get("country") or "unknown country").strip()
+        label = ", ".join(part for part in (city, region, country) if part)
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+    return labels
+
+
 def parse_intent(text: str, *, last_job: dict[str, Any] | None = None) -> ParsedIntent:
     stripped = text.strip()
     lower = stripped.lower()
@@ -790,7 +873,7 @@ def parse_intent(text: str, *, last_job: dict[str, Any] | None = None) -> Parsed
         return ParsedIntent(kind="report_request", subject_type="company", subject_value=company_value)
 
     license_match = re.search(
-        r"\b(?:license|lic|id)\s*[:#]?\s*([A-Za-z0-9._-]{4,})\b",
+        r"\b(?:license|lic|id)\b\s*[:#]?\s*([A-Za-z0-9._-]{4,})\b",
         stripped,
         flags=re.IGNORECASE,
     )
@@ -885,6 +968,10 @@ def _looks_like_follow_up_question(lower: str) -> bool:
         "is that violating",
         "what about this company",
         "what about this license",
+        "this license",
+        "this company",
+        "latest report",
+        "previous report",
     )
     return any(pattern in lower for pattern in patterns)
 
