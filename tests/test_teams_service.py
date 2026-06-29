@@ -161,6 +161,57 @@ class TeamsChatServiceTests(TestCase):
             self.assertNotIn("I completed the report", response["message"])
             self.assertEqual(len(service.store.recent_jobs("analyst@example.com")), 2)
 
+    def test_company_history_interprets_and_filters_polluted_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = LicenseAgentSettings(
+                app_db_path=str(Path(temp_dir) / "app.sqlite3"),
+                report_output_root=str(Path(temp_dir) / "reports"),
+            )
+            service = TeamsChatService(settings, run_async=False)
+            bad_question = service.store.create_job(
+                user_id="analyst@example.com",
+                job_type="investigation_report",
+                subject_type="company",
+                subject_value="What are the companies that I have asked about so far?",
+                payload={},
+            )
+            service.store.mark_completed(bad_question["job_id"], {"subject": bad_question["subject_value"]})
+            correction = service.store.create_job(
+                user_id="analyst@example.com",
+                job_type="investigation_report",
+                subject_type="company",
+                subject_value="Sorry I meant Rockwool",
+                payload={},
+            )
+            service.store.mark_completed(correction["job_id"], {"subject": "Rockwool Bv"})
+            long_instruction = service.store.create_job(
+                user_id="analyst@example.com",
+                job_type="investigation_report",
+                subject_type="company",
+                subject_value=(
+                    "Mediterranean Shipping Company Pty Ltd. I am looking for possible evidence "
+                    "that they might be violation the LinkTek EULA (license violation)"
+                ),
+                payload={},
+            )
+            service.store.mark_completed(long_instruction["job_id"], {"subject": long_instruction["subject_value"]})
+            service.handle_message("company Nostra", "analyst@example.com")
+
+            response = service.handle_message(
+                "What are the companies that I have asked about so far?",
+                "analyst@example.com",
+            )
+
+            self.assertEqual(response["type"], "company_history")
+            self.assertIn("likely company subject", response["message"])
+            self.assertIn("`Nostra`", response["message"])
+            self.assertIn("`Rockwool Bv`", response["message"])
+            self.assertIn("`Mediterranean Shipping Company Pty Ltd`", response["message"])
+            self.assertIn("filtered out", response["message"])
+            self.assertNotIn("What are the companies", response["message"])
+            self.assertNotIn("Sorry I meant", response["message"])
+            self.assertNotIn("possible evidence", response["message"])
+
     def test_feedback_records_preference(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = LicenseAgentSettings(

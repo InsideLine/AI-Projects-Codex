@@ -160,11 +160,20 @@ class TeamsChatService:
 
     def _company_history(self, user_id: str) -> dict[str, Any]:
         summary = self.store.user_summary(user_id)
-        companies = _company_subjects_from_summary(summary, limit=10)
+        companies, filtered_count = _company_subjects_from_summary(summary, limit=10)
         if not companies:
             message = "I do not have any company report requests saved for you yet."
         else:
-            message = "Companies you have asked me about so far: " + "; ".join(f"`{company}`" for company in companies) + "."
+            message = (
+                f"I found {len(companies)} likely company subject(s) in your report history: "
+                + "; ".join(f"`{company}`" for company in companies)
+                + "."
+            )
+            if filtered_count:
+                message += (
+                    f" I filtered out {filtered_count} stored item(s) that looked like questions, corrections, "
+                    "or report instructions rather than actual company names."
+                )
         return {"type": "company_history", "message": message, "state": self.state(user_id)}
 
     def _explain_last_report(self, user_id: str) -> dict[str, Any]:
@@ -667,15 +676,17 @@ def _recent_subject_labels(recent_jobs: list[dict[str, Any]], *, limit: int) -> 
     return labels
 
 
-def _company_subjects_from_summary(summary: dict[str, Any], *, limit: int) -> list[str]:
+def _company_subjects_from_summary(summary: dict[str, Any], *, limit: int) -> tuple[list[str], int]:
     companies: list[str] = []
     seen: set[str] = set()
+    filtered_count = 0
     for collection_name in ("recent_jobs", "top_subjects"):
         for item in summary.get(collection_name) or []:
             if str(item.get("subject_type") or "").lower() != "company":
                 continue
-            company = str(item.get("subject_value") or "").strip()
+            company = _interpreted_company_subject(item)
             if not company:
+                filtered_count += 1
                 continue
             key = normalize_company_name(company)
             if key in seen:
@@ -683,8 +694,43 @@ def _company_subjects_from_summary(summary: dict[str, Any], *, limit: int) -> li
             seen.add(key)
             companies.append(company)
             if len(companies) >= limit:
-                return companies
-    return companies
+                return companies, filtered_count
+    return companies, filtered_count
+
+
+def _interpreted_company_subject(item: dict[str, Any]) -> str | None:
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    result_subject = _clean_memory_company_subject(str(result.get("subject") or ""))
+    if result_subject and not _looks_like_non_company_memory_value(result_subject):
+        return result_subject
+
+    subject_value = _clean_memory_company_subject(str(item.get("subject_value") or ""))
+    if subject_value and not _looks_like_non_company_memory_value(subject_value):
+        return subject_value
+    return None
+
+
+def _clean_memory_company_subject(value: str) -> str:
+    cleaned = value.strip()
+    cleaned = re.sub(r"^(?:sorry\s+)?(?:i|we)\s+meant\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:actually|use|make that|try)\s+", "", cleaned, flags=re.IGNORECASE)
+    return _clean_company_subject(cleaned)
+
+
+def _looks_like_non_company_memory_value(value: str) -> bool:
+    cleaned = value.strip()
+    lower = cleaned.lower()
+    if not cleaned:
+        return True
+    if "?" in cleaned:
+        return True
+    if _looks_like_company_history_request(lower) or _looks_like_general_history_request(lower):
+        return True
+    if re.search(r"\b(eula|license violation|possible evidence|looking for)\b", lower):
+        return True
+    if re.match(r"^(what|who|when|where|why|how|do|does|did|can|could|would|should|please)\b", lower):
+        return True
+    return False
 
 
 def parse_intent(text: str, *, last_job: dict[str, Any] | None = None) -> ParsedIntent:
