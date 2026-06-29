@@ -1284,7 +1284,7 @@ def _crm_report_section(crm_context: dict[str, Any]) -> dict[str, Any]:
         "heading": "CRM Relationship, Ownership, Purchase, And Communications",
         "status": "CRM Aurora relationship and entitlement data: connected.",
         "body": [
-            "CRM lookups are available through Aurora. Email bodies are not present in this Aurora sync; available communication context comes from notes, calls, meetings, tasks, deals, SRFs, and license-verification records."
+            "CRM lookups are available through Aurora. Email bodies are not present in this Aurora sync; available communication context comes from notes, calls, meetings, tasks, deals, SRFs, and related CRM records."
         ],
         "bullets": bullets,
     }
@@ -1374,7 +1374,7 @@ def _crm_linked_record_bullets(linked_licenses: list[dict[str, Any]]) -> list[st
                 + ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
             )
         for lv in (linked.get("license_verifications") or [])[:2]:
-            detail = f"License Verification {lv.get('name') or lv.get('id')}: stage {lv.get('stage') or 'unknown'}"
+            detail = f"CRM review context {lv.get('name') or lv.get('id')}: stage {lv.get('stage') or 'unknown'}"
             if lv.get("organization_definition"):
                 detail += f"; org definition {lv.get('organization_definition')}"
             if lv.get("personnel_count") is not None:
@@ -1568,7 +1568,7 @@ def _automated_consistency_findings(
                 "code": "entitlement_count_inconsistency",
                 "title": "Entitlement count signals are inconsistent",
                 "severity": "medium",
-                "detail": "CRM Customer License, quote line item, or license-verification count signals do not agree.",
+                "detail": "CRM Customer License, quote line item, or related CRM entitlement-count signals do not agree.",
                 "evidence": {"signals": count_check["signals"], "mismatches": count_check["mismatches"]},
             }
         )
@@ -1649,7 +1649,7 @@ def _prior_review_consistency_check(crm_context: dict[str, Any]) -> dict[str, An
             status = " ".join(str(value or "") for value in (lv.get("stage"), lv.get("current_status"))).lower()
             if any(word in status for word in ("violation", "unresolved", "investigat")):
                 flagged_records.append(
-                    f"License Verification {lv.get('name') or lv.get('id') or 'unknown'}: stage={lv.get('stage') or 'unknown'}; status={_truncate(str(lv.get('current_status') or ''), 120)}"
+                    f"CRM review context {lv.get('name') or lv.get('id') or 'unknown'}: stage={lv.get('stage') or 'unknown'}; status={_truncate(str(lv.get('current_status') or ''), 120)}"
                 )
     return {
         "srf_count": srf_count,
@@ -1677,7 +1677,7 @@ def _count_consistency_check(
         for lv in linked.get("license_verifications") or []:
             value = _positive_number(lv.get("personnel_count"))
             if value is not None:
-                signals.append({"source": "CRM License Verification personnel_count", "value": float(value), "role": "verification_personnel"})
+                signals.append({"source": "CRM related personnel_count", "value": float(value), "role": "verification_personnel"})
     metrics = solo_context.get("metrics") or {}
     solo_quantity = _positive_number(metrics.get("solo_entitlement_count") or metrics.get("q_ordered_total"))
     if solo_quantity is not None:
@@ -1725,14 +1725,14 @@ def _geography_check_bullets(geography: dict[str, Any]) -> list[str]:
 
 def _prior_review_check_bullets(prior_review: dict[str, Any]) -> list[str]:
     bullets = [
-        f"Prior CRM review check: sampled {prior_review['srf_count']} Sales Routing Form record(s) and {prior_review['license_verification_count']} License Verification record(s)."
+        f"Prior CRM review check: sampled {prior_review['srf_count']} Sales Routing Form record(s) and related CRM review context."
     ]
     if prior_review["flagged_records"]:
         bullets.append(
             f"Prior CRM review check: found {prior_review['flagged_count']} prior license-violation signal(s), including {prior_review['unresolved_count']} unresolved flag(s). Sample: {_sample_list(prior_review['flagged_records'], limit=3)}"
         )
     else:
-        bullets.append("Prior CRM review check: no sampled SRF or License Verification record contained a prior violation flag.")
+        bullets.append("Prior CRM review check: no sampled SRF or related CRM context contained a prior violation flag.")
     return bullets
 
 
@@ -1908,7 +1908,7 @@ def _licensed_personnel_signal(
         for row in linked.get("license_verifications") or []:
             value = _positive_number(row.get("personnel_count"))
             if value is not None:
-                return _personnel_signal(value, "CRM License Verification personnel_count")
+                return _personnel_signal(value, "CRM related personnel_count")
 
     for item in ((crm_context.get("linked_records") or {}).get("licenses") or []):
         linked = item.get("linked_records") or {}
