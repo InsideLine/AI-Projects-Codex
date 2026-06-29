@@ -115,6 +115,10 @@ class TeamsIntentTests(TestCase):
         intent = parse_intent("Hi, do you have data on how many files Mediterranean Shipping Company actually ran?")
         self.assertEqual(intent.kind, "data_query")
 
+    def test_parses_company_history_question(self) -> None:
+        intent = parse_intent("What are the companies that I have asked about so far?")
+        self.assertEqual(intent.kind, "company_history")
+
 
 class TeamsChatServiceTests(TestCase):
     def test_sync_report_job_completes_and_is_visible_in_history(self) -> None:
@@ -134,6 +138,28 @@ class TeamsChatServiceTests(TestCase):
             history = service.handle_message("history", "analyst@example.com")
             self.assertIn("license `66275132`", history["message"])
             self.assertNotIn(job_id, history["message"])
+
+    def test_company_history_question_lists_prior_companies_without_creating_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = LicenseAgentSettings(
+                app_db_path=str(Path(temp_dir) / "app.sqlite3"),
+                report_output_root=str(Path(temp_dir) / "reports"),
+            )
+            service = TeamsChatService(settings, run_async=False)
+            service.handle_message("company Example Corp", "analyst@example.com")
+            service.handle_message("company Rockwool Bv", "analyst@example.com")
+
+            response = service.handle_message(
+                "What are the companies that I have asked about so far?",
+                "analyst@example.com",
+            )
+
+            self.assertEqual(response["type"], "company_history")
+            self.assertIn("`Example Corp`", response["message"])
+            self.assertIn("`Rockwool Bv`", response["message"])
+            self.assertNotIn("I'm working on the report", response["message"])
+            self.assertNotIn("I completed the report", response["message"])
+            self.assertEqual(len(service.store.recent_jobs("analyst@example.com")), 2)
 
     def test_feedback_records_preference(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

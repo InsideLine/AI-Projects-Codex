@@ -75,6 +75,8 @@ class TeamsChatService:
             response = self._feedback_needs_code(user_id, intent)
         elif intent.kind == "job_status" and intent.job_id:
             response = self._job_status(user_id, intent.job_id)
+        elif intent.kind == "company_history":
+            response = self._company_history(user_id)
         elif intent.kind == "history":
             response = self._history(user_id)
         elif intent.kind == "explain_last_report":
@@ -146,12 +148,24 @@ class TeamsChatService:
             message = "No report requests have been queued yet for this user."
         else:
             latest = recent_jobs[0]
+            recent_subjects = _recent_subject_labels(recent_jobs, limit=5)
+            recent_text = f" Recent subjects: {'; '.join(recent_subjects)}." if recent_subjects else ""
             message = (
                 f"You have {summary['total_jobs']} queued or completed report request(s). "
                 f"The latest is for {latest['subject_type']} `{latest['subject_value']}` "
                 f"and is `{latest['status']}`."
+                + recent_text
             )
         return {"type": "history", "message": message, "state": self.state(user_id)}
+
+    def _company_history(self, user_id: str) -> dict[str, Any]:
+        summary = self.store.user_summary(user_id)
+        companies = _company_subjects_from_summary(summary, limit=10)
+        if not companies:
+            message = "I do not have any company report requests saved for you yet."
+        else:
+            message = "Companies you have asked me about so far: " + "; ".join(f"`{company}`" for company in companies) + "."
+        return {"type": "company_history", "message": message, "state": self.state(user_id)}
 
     def _explain_last_report(self, user_id: str) -> dict[str, Any]:
         latest_job = self.store.last_completed_job(user_id)
@@ -635,13 +649,55 @@ def _report_progress_message(subject_type: str, subject_value: str) -> str:
     )
 
 
+def _recent_subject_labels(recent_jobs: list[dict[str, Any]], *, limit: int) -> list[str]:
+    labels: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for job in recent_jobs:
+        subject_type = str(job.get("subject_type") or "").strip()
+        subject_value = str(job.get("subject_value") or "").strip()
+        if not subject_type or not subject_value:
+            continue
+        key = (subject_type.lower(), subject_value.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(f"{subject_type} `{subject_value}`")
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def _company_subjects_from_summary(summary: dict[str, Any], *, limit: int) -> list[str]:
+    companies: list[str] = []
+    seen: set[str] = set()
+    for collection_name in ("recent_jobs", "top_subjects"):
+        for item in summary.get(collection_name) or []:
+            if str(item.get("subject_type") or "").lower() != "company":
+                continue
+            company = str(item.get("subject_value") or "").strip()
+            if not company:
+                continue
+            key = normalize_company_name(company)
+            if key in seen:
+                continue
+            seen.add(key)
+            companies.append(company)
+            if len(companies) >= limit:
+                return companies
+    return companies
+
+
 def parse_intent(text: str, *, last_job: dict[str, Any] | None = None) -> ParsedIntent:
     stripped = text.strip()
     lower = stripped.lower()
     last_finding_codes = _finding_codes(last_job)
     if not stripped or lower in {"help", "?", "commands"}:
         return ParsedIntent(kind="help")
+    if _looks_like_company_history_request(lower):
+        return ParsedIntent(kind="company_history")
     if lower in {"history", "recent", "show history"}:
+        return ParsedIntent(kind="history")
+    if _looks_like_general_history_request(lower):
         return ParsedIntent(kind="history")
 
     status_match = re.search(r"\bstatus\b(?:\s+of)?\s+([A-Za-z0-9_-]+)", stripped, flags=re.IGNORECASE)
@@ -733,6 +789,30 @@ def _extract_reason_comment(text: str) -> str:
     if because_match:
         return because_match.group(1).strip().rstrip(".")
     return text.strip().rstrip(".")
+
+
+def _looks_like_company_history_request(lower: str) -> bool:
+    return (
+        any(phrase in lower for phrase in ("companies", "company names", "customers", "accounts"))
+        and any(phrase in lower for phrase in ("asked about", "looked at", "checked", "reports on", "so far"))
+    )
+
+
+def _looks_like_general_history_request(lower: str) -> bool:
+    return any(
+        phrase in lower
+        for phrase in (
+            "what have i asked",
+            "what did i ask",
+            "what have we asked",
+            "what did we ask",
+            "what have i looked at",
+            "what did i look at",
+            "what have we looked at",
+            "show me what i asked",
+            "show me what we asked",
+        )
+    )
 
 
 def _looks_like_explanation_request(lower: str) -> bool:
